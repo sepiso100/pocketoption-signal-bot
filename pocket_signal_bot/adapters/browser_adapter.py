@@ -414,7 +414,18 @@ class PocketOptionBrowserAdapter:
             bucket = int(ts // timeframe_sec)
             buckets.setdefault(bucket, []).append(p)
         keys = sorted(buckets.keys())[-count:]
-        candles = [{"time": k * timeframe_sec, "close": float(buckets[k][-1])} for k in keys]
+        # These OHLC values summarize observed WebSocket/DOM quotes; they are
+        # sampled quote candles, not broker-reported volume or order-flow data.
+        candles = [
+            {
+                "time": k * timeframe_sec,
+                "open": float(buckets[k][0]),
+                "high": float(max(buckets[k])),
+                "low": float(min(buckets[k])),
+                "close": float(buckets[k][-1]),
+            }
+            for k in keys
+        ]
         return candles
 
     async def get_payout_pct(self, asset: str) -> float:

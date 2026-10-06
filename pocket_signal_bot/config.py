@@ -81,9 +81,14 @@ class BotConfig:
     max_trades_per_day: int = _env_int("PO_MAX_TRADES_PER_DAY", 20)
     daily_loss_stop_pct: float = _env_float("PO_DAILY_LOSS_STOP_PCT", 2.0)
 
-    # Runtime mode: paper | demo | live
+    # Runtime mode: paper | demo | live | signals (signals never place orders)
     mode: str = os.getenv("PO_MODE", "paper")
     po_live_confirmed: bool = _env_bool("PO_LIVE_CONFIRMED", False)
+    signal_interval_sec: int = max(60, _env_int("PO_SIGNAL_INTERVAL_SEC", 360))
+    signal_min_alignment: int = max(70, min(100, _env_int("PO_SIGNAL_MIN_ALIGNMENT", 70)))
+    signal_timezone: str = os.getenv("PO_SIGNAL_TIMEZONE", "Africa/Lusaka").strip() or "Africa/Lusaka"
+    signal_ingest_url: str = os.getenv("SIGNAL_INGEST_URL", "").strip()
+    signal_ingest_token: str = os.getenv("SIGNAL_INGEST_TOKEN", "").strip()
     adapter_priority: str = os.getenv("PO_ADAPTER_PRIORITY", "api_then_browser")
     poll_seconds: int = _env_int("PO_POLL_SECONDS", 2)
 
@@ -152,9 +157,9 @@ class BotConfig:
     @property
     def effective_mode(self) -> str:
         m = (self.mode or "paper").strip().lower()
-        if m not in ("paper", "demo", "live"):
+        if m not in ("paper", "demo", "live", "signals"):
             print(
-                f"[config] WARNING: PO_MODE={self.mode!r} is not valid (paper|demo|live); running as paper.",
+                f"[config] WARNING: PO_MODE={self.mode!r} is not valid (paper|demo|live|signals); running as paper.",
                 file=sys.stderr,
             )
             return "paper"
@@ -162,7 +167,7 @@ class BotConfig:
 
     @property
     def requires_broker(self) -> bool:
-        return self.effective_mode in ("demo", "live")
+        return self.effective_mode in ("demo", "live", "signals")
 
     @property
     def api_is_demo(self) -> bool:
@@ -191,7 +196,21 @@ def validate_config(cfg: BotConfig) -> None:
         raise SystemExit("Refusing broker start: PO_SESSION and PO_UID are required.")
     if cfg.requires_broker and not cfg.po_uid.strip().isdigit():
         raise SystemExit("Refusing broker start: PO_UID must be numeric.")
-    if cfg.requires_broker:
+    if cfg.effective_mode == "signals":
+        from urllib.parse import urlparse
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+        parsed = urlparse(cfg.signal_ingest_url)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise SystemExit("Refusing signal start: SIGNAL_INGEST_URL must be a valid HTTPS URL.")
+        if len(cfg.signal_ingest_token) < 32:
+            raise SystemExit("Refusing signal start: SIGNAL_INGEST_TOKEN must be at least 32 characters.")
+        try:
+            ZoneInfo(cfg.signal_timezone)
+        except ZoneInfoNotFoundError:
+            raise SystemExit("Refusing signal start: PO_SIGNAL_TIMEZONE must be a valid timezone.") from None
+        if cfg.skip_api_connect:
+            raise SystemExit("Refusing signal start: PO_SKIP_API_CONNECT=true prevents market data access.")
+    if cfg.effective_mode in ("demo", "live"):
         if not math.isfinite(cfg.trade_amount) or cfg.trade_amount <= 0:
             raise SystemExit("Refusing broker start: PO_TRADE_AMOUNT must be positive and finite.")
         if not math.isfinite(cfg.min_payout_pct) or not (0 < cfg.min_payout_pct < 100):

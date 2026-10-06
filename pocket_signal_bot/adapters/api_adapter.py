@@ -67,15 +67,26 @@ class PocketOptionApiAdapter:
                 if isinstance(data, list) and data:
                     normalized: list[dict[str, Any]] = []
                     for row in data[-count:]:
-                        if isinstance(row, dict):
-                            close = row.get("close") or row.get("c")
-                            ts = row.get("time") or row.get("timestamp") or row.get("t")
-                        else:
-                            close = getattr(row, "close", None)
-                            ts = getattr(row, "time", None) or getattr(row, "timestamp", None)
+                        def field(*names: str):
+                            for name in names:
+                                value = row.get(name) if isinstance(row, dict) else getattr(row, name, None)
+                                if value is not None:
+                                    return value
+                            return None
+
+                        close = field("close", "c")
+                        ts = field("time", "timestamp", "t")
                         if close is None:
                             continue
-                        normalized.append({"close": float(close), "time": ts})
+                        try:
+                            candle = {"close": float(close), "time": ts}
+                            for target, names in (("open", ("open", "o")), ("high", ("high", "h")), ("low", ("low", "l")), ("volume", ("volume", "vol", "v"))):
+                                value = field(*names)
+                                if value is not None:
+                                    candle[target] = float(value)
+                            normalized.append(candle)
+                        except (TypeError, ValueError, OverflowError):
+                            continue
                     if normalized:
                         return normalized
             except Exception:
