@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import os
 import sys
 
@@ -75,6 +76,7 @@ class BotConfig:
     trade_amount: float = _env_float("PO_TRADE_AMOUNT", 1.0)
     min_payout_pct: float = _env_float("PO_MIN_PAYOUT_PCT", 70.0)
     max_signal_age_ms: int = _env_int("PO_MAX_SIGNAL_AGE_MS", 1500)
+    max_candle_age_sec: int = _env_int("PO_MAX_CANDLE_AGE_SEC", 0)
     max_consecutive_losses: int = _env_int("PO_MAX_CONSECUTIVE_LOSSES", 3)
     max_trades_per_day: int = _env_int("PO_MAX_TRADES_PER_DAY", 20)
     daily_loss_stop_pct: float = _env_float("PO_DAILY_LOSS_STOP_PCT", 2.0)
@@ -120,6 +122,7 @@ class BotConfig:
 
     # Trade history + charts (PNG)
     trade_data_path: str = os.getenv("PO_TRADE_DATA_PATH", "data/trading_history.json")
+    risk_state_path: str = os.getenv("PO_RISK_STATE_PATH", "data/risk_state.json")
     charts_dir: str = os.getenv("PO_CHARTS_DIR", "data/charts")
     charts_auto: bool = _env_bool("PO_CHARTS_AUTO", True)
     experiment_label: str = os.getenv("PO_EXPERIMENT_LABEL", "").strip()
@@ -163,9 +166,8 @@ class BotConfig:
 
     @property
     def api_is_demo(self) -> bool:
-        if self.effective_mode == "live":
-            return False
-        return self.po_is_demo
+        # Never let a stale PO_IS_DEMO=false turn demo mode into real-money orders.
+        return self.effective_mode != "live"
 
     @property
     def browser_base_url(self) -> str:
@@ -175,17 +177,26 @@ class BotConfig:
 
 
 def validate_config(cfg: BotConfig) -> None:
-    """Refuse unsafe live start unless explicitly confirmed."""
-    if cfg.effective_mode == "live" and not cfg.po_live_confirmed:
-        print(
-            "Refusing to start: PO_MODE=live requires PO_LIVE_CONFIRMED=true (real money). "
-            "Set it only if you accept full risk.",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
+    """Validate safety-critical settings before connecting to a broker."""
+    if cfg.effective_mode == "live":
+        if not cfg.po_live_confirmed:
+            raise SystemExit("Refusing live start: PO_LIVE_CONFIRMED=true is required.")
+        if not os.getenv("PO_REGION", "").strip() or cfg.po_region.strip().upper() == "DEMO":
+            raise SystemExit("Refusing live start: set PO_REGION to the verified real-account region.")
+        if not os.getenv("PO_TRADE_AMOUNT", "").strip():
+            raise SystemExit("Refusing live start: set a fixed PO_TRADE_AMOUNT explicitly.")
+        if cfg.skip_api_connect:
+            raise SystemExit("Refusing live start: PO_SKIP_API_CONNECT=true is not allowed.")
     if cfg.requires_broker and (not cfg.po_session or not cfg.po_uid):
-        print(
-            "Refusing to start: PO_MODE=demo or live requires PO_SESSION and PO_UID.",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
+        raise SystemExit("Refusing broker start: PO_SESSION and PO_UID are required.")
+    if cfg.requires_broker and not cfg.po_uid.strip().isdigit():
+        raise SystemExit("Refusing broker start: PO_UID must be numeric.")
+    if cfg.requires_broker:
+        if not math.isfinite(cfg.trade_amount) or cfg.trade_amount <= 0:
+            raise SystemExit("Refusing broker start: PO_TRADE_AMOUNT must be positive and finite.")
+        if not math.isfinite(cfg.min_payout_pct) or not (0 < cfg.min_payout_pct < 100):
+            raise SystemExit("Refusing broker start: PO_MIN_PAYOUT_PCT must be between 0 and 100.")
+        if cfg.max_consecutive_losses < 1 or cfg.max_trades_per_day < 1:
+            raise SystemExit("Refusing broker start: loss and daily trade limits must be positive.")
+        if not math.isfinite(cfg.daily_loss_stop_pct) or cfg.daily_loss_stop_pct <= 0:
+            raise SystemExit("Refusing broker start: PO_DAILY_LOSS_STOP_PCT must be positive.")

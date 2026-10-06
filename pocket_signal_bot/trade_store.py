@@ -82,6 +82,12 @@ class TradeStore:
         }
 
     def begin_session(self, config: dict[str, Any]) -> str:
+        previous = self._data.get("active_session")
+        if isinstance(previous, dict):
+            previous["ended_at"] = datetime.now(timezone.utc).isoformat()
+            previous["interrupted"] = True
+            self._recompute_summary(previous)
+            self._data.setdefault("sessions", []).append(previous)
         session_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         self._data["active_session"] = {
             "session_id": session_id,

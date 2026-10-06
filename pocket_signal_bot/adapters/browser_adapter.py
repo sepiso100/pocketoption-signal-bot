@@ -419,7 +419,7 @@ class PocketOptionBrowserAdapter:
 
     async def get_payout_pct(self, asset: str) -> float:
         if self._page is None:
-            return 80.0
+            raise RuntimeError("Browser is not connected; payout is unverified.")
         # Prefer payout percentages from the RIGHT trading panel.
         # This avoids grabbing unrelated top-tile values and "100% bonus" banner text.
         try:
@@ -506,7 +506,7 @@ class PocketOptionBrowserAdapter:
                 continue
         if fallback_vals:
             return max(fallback_vals)
-        return 80.0
+        raise RuntimeError("Could not verify the selected asset payout from the trading panel.")
 
     async def place_order(self, asset: str, amount: float, direction: str, expiry_sec: int) -> str:
         if self._page is None:

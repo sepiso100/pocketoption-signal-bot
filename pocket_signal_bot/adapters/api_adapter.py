@@ -83,8 +83,8 @@ class PocketOptionApiAdapter:
         raise RuntimeError("Could not fetch candles from unofficial SDK. Check SDK version/method names.")
 
     async def get_payout_pct(self, asset: str) -> float:
-        # SDK does not expose payout; return 80 so caller falls through to browser path.
-        return 80.0
+        # Never fabricate a payout: the runner must verify it elsewhere or block trading.
+        raise RuntimeError("Unofficial API adapter cannot verify payout.")
 
     async def place_order(self, asset: str, amount: float, direction: str, expiry_sec: int) -> str:
         if self._client is None or self._deals is None:
@@ -106,7 +106,10 @@ class PocketOptionApiAdapter:
             option_type=100,
             time=expiry_sec,
         )
-        return str(getattr(deal, "id", "")) or str(getattr(deal, "deal_id", ""))
+        order_id = str(getattr(deal, "id", "")) or str(getattr(deal, "deal_id", ""))
+        if not order_id:
+            raise RuntimeError("Broker accepted no verifiable order identifier; reconcile before retrying.")
+        return order_id
 
     async def check_result(self, order_id: str, wait_sec: int) -> dict[str, Any]:
         if self._deals is None:
