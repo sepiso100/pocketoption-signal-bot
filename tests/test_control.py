@@ -8,7 +8,8 @@ from pocket_signal_bot.control import ControlHTTPServer, ControlState
 
 class ControlApiTests(unittest.TestCase):
     def setUp(self):
-        self.state = ControlState(token="secret", mode="live")
+        self.token = "test-control-token-0123456789abcdef"
+        self.state = ControlState(token=self.token, mode="live")
         self.server = ControlHTTPServer(self.state, host="127.0.0.1", port=0)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -36,25 +37,25 @@ class ControlApiTests(unittest.TestCase):
     def test_controls_require_bearer_and_never_change_mode(self):
         status, _ = self.request("GET", "/v1/control/status")
         self.assertEqual(status, 401)
-        status, payload = self.request("POST", "/v1/control", {"action": "pause"}, "secret")
+        status, payload = self.request("POST", "/v1/control", {"action": "pause"}, self.token)
         self.assertEqual(status, 200)
         self.assertTrue(payload["paused"])
         self.assertEqual(payload["mode"], "live")
         self.assertFalse(self.state.is_order_allowed())
-        status, payload = self.request("POST", "/v1/control", {"action": "resume"}, "secret")
+        status, payload = self.request("POST", "/v1/control", {"action": "resume"}, self.token)
         self.assertEqual(status, 200)
         self.assertTrue(self.state.is_order_allowed())
         self.assertEqual(payload["mode"], "live")
 
     def test_stop_is_terminal_for_order_gate(self):
-        status, _ = self.request("POST", "/v1/control", {"action": "stop"}, "secret")
+        status, _ = self.request("POST", "/v1/control", {"action": "stop"}, self.token)
         self.assertEqual(status, 200)
         self.assertFalse(self.state.is_order_allowed())
-        self.request("POST", "/v1/control", {"action": "resume"}, "secret")
+        self.request("POST", "/v1/control", {"action": "resume"}, self.token)
         self.assertFalse(self.state.is_order_allowed())
 
     def test_only_supported_actions(self):
-        status, _ = self.request("POST", "/v1/control", {"action": "live"}, "secret")
+        status, _ = self.request("POST", "/v1/control", {"action": "live"}, self.token)
         self.assertEqual(status, 400)
 
 

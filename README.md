@@ -149,7 +149,7 @@ No strategy guarantees profit. Treat this as research/automation infrastructure 
 
 ## Render control API
 
-Set `SIGNAL_CONTROL_TOKEN` to enable authenticated controls. Render supplies `PORT`; locally, the API defaults to `8080`.
+Set `SIGNAL_CONTROL_TOKEN` to a random value of at least 32 characters to enable authenticated controls. Render supplies `PORT`; locally, the API defaults to `8080`.
 
 - `GET /healthz` — public generic liveness response (`{"status":"ok"}`).
 - `GET /v1/control/status` — Bearer-token status; omits credentials and account data.

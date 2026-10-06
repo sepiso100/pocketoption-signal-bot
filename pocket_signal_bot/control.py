@@ -20,7 +20,7 @@ class ControlState:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.token)
+        return len(self.token) >= 32
 
     def is_order_allowed(self) -> bool:
         with self._lock:
