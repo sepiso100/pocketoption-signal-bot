@@ -3,7 +3,7 @@ services:
     name: pocketoption-signal-worker
     runtime: python
     plan: starter
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt && python -m playwright install --with-deps chromium
     startCommand: python -m pocket_signal_bot.runner
     healthCheckPath: /healthz
     autoDeploy: false
