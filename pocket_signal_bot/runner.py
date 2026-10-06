@@ -93,6 +93,8 @@ class HybridRunner:
         self._api_candles_fail_count = 0
         self._api_connected = False
         self._browser_connected = False
+        self._market_connect_failures = 0
+        self._next_market_connect_at = 0.0
         # Signal confirmation / flip-cooldown state
         self._prev_raw_signal: str | None = None
         self._flip_cooldown_until: float = 0.0
@@ -331,48 +333,119 @@ class HybridRunner:
 
     # ── Adapter connect / disconnect ─────────────────────────────────────────
 
-    async def _safe_connect(self) -> None:
-        if not self.cfg.requires_broker:
-            return
-        timeout = float(self.cfg.connect_timeout_sec)
-        if self.cfg.skip_api_connect:
-            self.logger.log("adapter_connect", adapter="api", ok=False, reason="disabled_by_config")
+    @staticmethod
+    def _safe_adapter_error(adapter: str, exc: Exception, *, phase: str) -> tuple[str, str]:
+        """Return allow-listed, credential-free diagnostics; never log raw exceptions."""
+        messages = [str(exc).lower()]
+        cause = exc.__cause__ or exc.__context__
+        if cause is not None:
+            messages.append(str(cause).lower())
+        text = " ".join(messages)
+        if isinstance(exc, asyncio.TimeoutError):
+            return "connect_timeout", "Check network and PO_CONNECT_TIMEOUT_SEC; no credential values are logged."
+        if "install playwright" in text or "no module named 'playwright'" in text:
+            return "playwright_dependency_missing", "Install project requirements, then install the Playwright Chromium browser."
+        if "install unofficial sdk" in text or "no module named 'pocket_option'" in text:
+            return "pocket_option_sdk_missing", "Install the pinned pocket-option SDK and verify its supported API."
+        if "executable doesn't exist" in text or "browsertype.launch" in text:
+            return "playwright_chromium_missing", "Run `python -m playwright install chromium` in the Render build."
+        if "not connected" in text or "closed" in text or "target page" in text:
+            return "adapter_disconnected", "The adapter will be reconnected with bounded backoff."
+        if phase == "data" and adapter == "browser" and "could not read price" in text:
+            return "browser_quote_unavailable", "Enable PO_USE_WS_QUOTES or configure PO_PRICE_SELECTOR for a real quote."
+        if phase == "data" and adapter == "api":
+            return "api_candles_unavailable", "Check PO_SESSION, PO_UID, PO_REGION and SDK candle-method compatibility."
+        if adapter == "api":
+            return "api_connect_failed", "Check PO_SESSION, PO_UID, PO_REGION, network access and SDK compatibility; secrets are redacted."
+        return "browser_connect_failed", "Check Playwright Chromium installation, Render runtime dependencies and broker login state."
+
+    def _schedule_market_retry(self) -> int:
+        self._market_connect_failures += 1
+        delay = min(60, 2 ** min(self._market_connect_failures, 6))
+        self._next_market_connect_at = time.monotonic() + delay
+        return delay
+
+    async def _disconnect_adapter(self, adapter_name: str) -> None:
+        adapter = self.api if adapter_name == "api" else self.browser
+        try:
+            await asyncio.wait_for(adapter.disconnect(), timeout=5.0)
+        except Exception:
+            pass
+        if adapter_name == "api":
+            self._api_connected = False
         else:
+            self._browser_connected = False
+
+    async def _safe_connect(self) -> bool:
+        if not self.cfg.requires_broker:
+            return True
+        timeout = float(self.cfg.connect_timeout_sec)
+        api_error: tuple[str, str] | None = None
+        browser_error: tuple[str, str] | None = None
+
+        if self.cfg.skip_api_connect:
+            self._api_connected = False
+            self.logger.log("adapter_connect", adapter="api", ok=False, reason="disabled_by_config")
+        elif not self._api_connected:
             try:
                 await asyncio.wait_for(self.api.connect(), timeout=timeout)
                 self._api_connected = True
+                # Reconnect clears the temporary circuit breaker; keep the
+                # failure streak until an actual candle fetch succeeds.
+                self._api_candles_disabled = False
                 self.logger.log("adapter_connect", adapter="api", ok=True)
             except Exception as exc:
                 self._api_connected = False
-                self.logger.log("adapter_connect", adapter="api", ok=False, error=type(exc).__name__)
-                try:
-                    await asyncio.wait_for(self.api.disconnect(), timeout=5.0)
-                except Exception:
-                    pass
+                api_error = self._safe_adapter_error("api", exc, phase="connect")
+                self.logger.log("adapter_connect", adapter="api", ok=False, error_code=api_error[0], hint=api_error[1])
+                await self._disconnect_adapter("api")
 
-        # Live execution is API-only. The browser flow cannot verify account,
-        # symbol, expiry, or stake and must never click a real-money order.
+        # Live execution remains API-only. Never use browser order fallback.
         if self.cfg.effective_mode == "live" and not self._api_connected:
             raise RuntimeError("Live trading blocked: broker API is unavailable; browser order fallback is disabled.")
 
-        if self.cfg.effective_mode != "live":
+        # Start the read-only browser fallback alongside the API so an API
+        # candle-method failure can fail over immediately instead of looping.
+        if self.cfg.effective_mode != "live" and not self._browser_connected:
             try:
                 await asyncio.wait_for(self.browser.connect(), timeout=timeout)
                 self._browser_connected = True
                 self.logger.log("adapter_connect", adapter="browser", ok=True)
             except Exception as exc:
                 self._browser_connected = False
-                self.logger.log("adapter_connect", adapter="browser", ok=False, error=type(exc).__name__)
+                browser_error = self._safe_adapter_error("browser", exc, phase="connect")
+                self.logger.log("adapter_connect", adapter="browser", ok=False, error_code=browser_error[0], hint=browser_error[1])
+                await self._disconnect_adapter("browser")
 
         if self.cfg.effective_mode == "signals":
-            # Read-only signal service needs market candles, never account balance.
+            # Signal mode is read-only and requires verified candles, not balance.
             self.control.update_risk("", False)
-            self.logger.log("connect_complete", mode="signals", balance_required=False)
-            return
+            available = self._api_connected or self._browser_connected
+            if self._api_connected:
+                self._next_market_connect_at = 0.0
+                self.logger.log("connect_complete", mode="signals", balance_required=False, connected_adapters=["api"])
+            elif self._browser_connected:
+                retry_after = self._schedule_market_retry()
+                self.logger.log(
+                    "market_data_degraded", mode="signals", connected_adapters=["browser"],
+                    api_error=api_error[0] if api_error else "api_unavailable", retry_after_sec=retry_after,
+                )
+            else:
+                retry_after = self._schedule_market_retry()
+                self.logger.log(
+                    "market_data_unavailable", mode="signals", retry_after_sec=retry_after,
+                    api_error=api_error[0] if api_error else "api_unavailable",
+                    browser_error=browser_error[0] if browser_error else "browser_unavailable",
+                    api_hint=api_error[1] if api_error else "Check broker API configuration.",
+                    browser_hint=browser_error[1] if browser_error else "Check browser fallback configuration.",
+                )
+            return available
 
         bal_timeout = min(15.0, max(5.0, timeout / 4))
-        adapters = [("api", self.api)]
-        if self.cfg.effective_mode != "live":
+        adapters = []
+        if self._api_connected:
+            adapters.append(("api", self.api))
+        if self.cfg.effective_mode != "live" and self._browser_connected:
             adapters.append(("browser", self.browser))
         verified = False
         for adapter_name, adapter in adapters:
@@ -390,6 +463,7 @@ class HybridRunner:
             raise RuntimeError("Broker balance could not be verified; trading is blocked.")
         self.control.update_risk(self.risk.halted_reason, self.risk.pending_order)
         self.logger.log("connect_complete", mode=self.cfg.effective_mode, balance_verified=True)
+        return True
 
     async def _safe_disconnect(self) -> None:
         for adapter_name, adapter in (("api", self.api), ("browser", self.browser)):
@@ -400,8 +474,9 @@ class HybridRunner:
                 else:
                     self._browser_connected = False
                 self.logger.log("adapter_disconnect", adapter=adapter_name, ok=True)
-            except Exception as e:
-                self.logger.log("adapter_disconnect", adapter=adapter_name, ok=False, error=str(e))
+            except Exception as exc:
+                code, _ = self._safe_adapter_error(adapter_name, exc, phase="disconnect")
+                self.logger.log("adapter_disconnect", adapter=adapter_name, ok=False, error_code=code)
 
     # ── Data helpers ─────────────────────────────────────────────────────────
 
@@ -423,18 +498,27 @@ class HybridRunner:
                     what="get_candles",
                 )
                 self._api_candles_fail_count = 0
+                self._api_candles_disabled = False
+                self._market_connect_failures = 0
+                self._next_market_connect_at = 0.0
                 return candles, "api"
-            except Exception as e:
+            except Exception as exc:
                 self._api_connected = False
                 self._api_candles_fail_count += 1
-                self.logger.log("data_failover", from_adapter="api", to_adapter="browser", error=str(e))
+                code, hint = self._safe_adapter_error("api", exc, phase="data")
+                self.logger.log("data_failover", from_adapter="api", to_adapter="browser", error_code=code, hint=hint)
+                await self._disconnect_adapter("api")
+                self._schedule_market_retry()
                 if self._api_candles_fail_count >= 3:
                     self._api_candles_disabled = True
                     self.logger.log(
                         "api_candles_disabled",
-                        reason="repeated_api_candle_failures",
+                        reason="repeated_api_candle_failures_until_reconnect",
                         fail_count=self._api_candles_fail_count,
                     )
+        if not self._browser_connected:
+            self.logger.log("data_error", adapter="browser", error_code="adapter_disconnected", hint="Browser fallback is not connected; reconnect is scheduled.")
+            return [], "error"
         try:
             browser_cap = float(self.cfg.data_timeout_sec) + 50.0
             candles = await asyncio.wait_for(
@@ -442,8 +526,12 @@ class HybridRunner:
                 timeout=browser_cap,
             )
             return candles, "browser"
-        except Exception as e2:
-            self.logger.log("data_error", adapter="browser", error=str(e2))
+        except Exception as exc:
+            code, hint = self._safe_adapter_error("browser", exc, phase="data")
+            self.logger.log("data_error", adapter="browser", error_code=code, hint=hint)
+            if code == "adapter_disconnected":
+                await self._disconnect_adapter("browser")
+                self._schedule_market_retry()
             return [], "error"
 
     async def _get_payout_with_failover(self) -> tuple[float, str]:
@@ -534,6 +622,18 @@ class HybridRunner:
             )
         try:
             while True:
+                if self.cfg.effective_mode == "signals" and not self._api_connected:
+                    if time.monotonic() >= self._next_market_connect_at:
+                        await self._safe_connect()
+                    if not (self._api_connected or self._browser_connected):
+                        retry_after = max(0, int(self._next_market_connect_at - time.monotonic()))
+                        self.logger.log(
+                            "no_candles", adapter="error", reason="market_data_unavailable",
+                            retry_after_sec=retry_after,
+                        )
+                        await asyncio.sleep(max(self.cfg.poll_seconds, retry_after))
+                        continue
+
                 candles, candles_adapter = await self._get_candles_with_failover()
                 if not candles:
                     self.logger.log("no_candles", adapter=candles_adapter)

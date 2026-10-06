@@ -1,6 +1,7 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 from pocket_signal_bot.config import BotConfig, validate_config
 from pocket_signal_bot.runner import HybridRunner
@@ -30,6 +31,65 @@ class SignalModeTests(unittest.TestCase):
         runner.cfg = SimpleNamespace(effective_mode="signals", requires_broker=True)
         with self.assertRaisesRegex(RuntimeError, "categorically blocks"):
             asyncio.run(runner._place_with_failover("CALL", 1.0))
+
+
+class SignalConnectionRecoveryTests(unittest.TestCase):
+    def make_runner(self, api_connect, browser_connect):
+        runner = object.__new__(HybridRunner)
+        runner.cfg = SimpleNamespace(
+            requires_broker=True, connect_timeout_sec=1.0, skip_api_connect=False,
+            effective_mode="signals",
+        )
+        runner.api = SimpleNamespace(
+            connect=AsyncMock(side_effect=api_connect), disconnect=AsyncMock(), get_balance=AsyncMock()
+        )
+        runner.browser = SimpleNamespace(connect=AsyncMock(side_effect=browser_connect), disconnect=AsyncMock())
+        runner._api_connected = False
+        runner._browser_connected = False
+        runner._api_candles_disabled = False
+        runner._api_candles_fail_count = 0
+        runner._market_connect_failures = 0
+        runner._next_market_connect_at = 0.0
+        runner.logger = SimpleNamespace(log=Mock())
+        runner.control = SimpleNamespace(update_risk=Mock())
+        return runner
+
+    def test_total_signal_feed_failure_is_not_reported_as_success_and_is_redacted(self):
+        secret = "token-do-not-log-0123456789abcdef"
+        runner = self.make_runner(RuntimeError(secret), RuntimeError(secret))
+        connected = asyncio.run(runner._safe_connect())
+
+        self.assertFalse(connected)
+        events = [call.args[0] for call in runner.logger.log.call_args_list]
+        self.assertIn("market_data_unavailable", events)
+        self.assertNotIn("connect_complete", events)
+        self.assertNotIn(secret, repr(runner.logger.log.call_args_list))
+        self.assertGreater(runner._next_market_connect_at, 0)
+        runner.api.disconnect.assert_awaited_once()
+        runner.browser.disconnect.assert_awaited_once()
+
+    def test_disconnected_api_is_retried_even_when_browser_fallback_is_up(self):
+        runner = self.make_runner([RuntimeError("temporary failure"), None], None)
+        runner._browser_connected = True
+
+        self.assertTrue(asyncio.run(runner._safe_connect()))
+        self.assertFalse(runner._api_connected)
+        self.assertGreater(runner._next_market_connect_at, 0)
+
+        runner._next_market_connect_at = 0.0
+        self.assertTrue(asyncio.run(runner._safe_connect()))
+        self.assertTrue(runner._api_connected)
+        self.assertEqual(runner._next_market_connect_at, 0.0)
+        self.assertEqual(runner.api.connect.await_count, 2)
+        runner.api.get_balance.assert_not_awaited()
+
+    def test_live_api_failure_still_blocks_without_browser_order_fallback(self):
+        runner = self.make_runner(RuntimeError("temporary failure"), None)
+        runner.cfg.effective_mode = "live"
+
+        with self.assertRaisesRegex(RuntimeError, "Live trading blocked"):
+            asyncio.run(runner._safe_connect())
+        runner.browser.connect.assert_not_awaited()
 
 
 if __name__ == "__main__":

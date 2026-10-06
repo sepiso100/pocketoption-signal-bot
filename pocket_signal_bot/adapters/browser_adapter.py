@@ -293,6 +293,8 @@ class PocketOptionBrowserAdapter:
         )
 
     async def connect(self) -> None:
+        # Close stale/partially-created handles before starting a new session.
+        await self.disconnect()
         try:
             from playwright.async_api import async_playwright  # type: ignore
         except Exception as e:
@@ -392,10 +394,26 @@ class PocketOptionBrowserAdapter:
         )
 
     async def disconnect(self) -> None:
-        if self._browser:
-            await self._browser.close()
-        if self._playwright:
-            await self._playwright.stop()
+        browser, playwright = self._browser, self._playwright
+        self._browser = None
+        self._playwright = None
+        self._page = None
+        self._ticks.clear()
+        self._last_ws_price = None
+        self._last_ws_ts = 0.0
+        errors: list[Exception] = []
+        if browser is not None:
+            try:
+                await browser.close()
+            except Exception as exc:
+                errors.append(exc)
+        if playwright is not None:
+            try:
+                await playwright.stop()
+            except Exception as exc:
+                errors.append(exc)
+        if errors:
+            raise RuntimeError("Browser adapter cleanup failed") from None
 
     async def get_candles(self, asset: str, timeframe_sec: int, count: int) -> list[dict[str, Any]]:
         if self.cfg.use_ws_quotes and self._page is not None:

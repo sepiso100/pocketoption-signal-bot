@@ -50,8 +50,16 @@ class PocketOptionApiAdapter:
         await asyncio.sleep(1)
 
     async def disconnect(self) -> None:
-        if self._client:
-            await self._client.disconnect()
+        # Clear references even when the SDK's partial-connection cleanup fails;
+        # otherwise the runner can mistake a dead client for a reusable one.
+        client = self._client
+        self._client = None
+        self._deals = None
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
 
     async def get_candles(self, asset: str, timeframe_sec: int, count: int) -> list[dict[str, Any]]:
         if self._client is None:
