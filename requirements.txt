@@ -1,5 +1,5 @@
 MetaTrader5>=5.0.45; platform_system == "Windows"
-pocket-option>=0.1.6
+pocket-option==0.4.0
 playwright>=1.52.0
 python-dotenv>=1.0.0
 websockets
