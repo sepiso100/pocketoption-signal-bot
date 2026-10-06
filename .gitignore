@@ -2,3 +2,6 @@
 logs/
 data/
 tools/eurusd_compare/output/
+__pycache__/
+*.py[cod]
+.pytest_cache/

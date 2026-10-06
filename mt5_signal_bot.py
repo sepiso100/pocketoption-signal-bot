@@ -83,7 +83,7 @@ class MT5SignalBot:
 
     def connect(self) -> None:
         if mt5 is None:
-            raise RuntimeError("MetaTrader5 package is not installed.")
+            raise RuntimeError("MetaTrader5 is unavailable on this platform. Install this bot on Windows with MetaTrader 5 and rerun: pip install MetaTrader5")
         if not mt5.initialize():
             raise RuntimeError(f"MT5 initialize failed: {mt5.last_error()}")
         info = mt5.account_info()

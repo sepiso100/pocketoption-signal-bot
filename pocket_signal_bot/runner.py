@@ -8,6 +8,7 @@ from typing import Any
 from pocket_signal_bot.adapters.api_adapter import PocketApiConfig, PocketOptionApiAdapter
 from pocket_signal_bot.adapters.browser_adapter import BrowserConfig, PocketOptionBrowserAdapter
 from pocket_signal_bot.config import BotConfig, validate_config
+from pocket_signal_bot.control import ControlServer, ControlState
 from pocket_signal_bot.logger import JsonEventLogger
 from pocket_signal_bot.paper_simulator import PocketPaperSimulator
 from pocket_signal_bot.risk import RiskConfig, RiskManager
@@ -23,6 +24,8 @@ except ImportError:
 class HybridRunner:
     def __init__(self, cfg: BotConfig):
         self.cfg = cfg
+        self.control = ControlState(mode=cfg.effective_mode)
+        self.control_server = ControlServer(self.control)
         self.logger = JsonEventLogger(console=cfg.po_console_log)
         self.strategy = EmaRsiStrategy(
             StrategyConfig(
@@ -472,6 +475,7 @@ class HybridRunner:
             api_is_demo=self.cfg.api_is_demo,
             requires_broker=self.cfg.requires_broker,
         )
+        self.control_server.start()
         await self._safe_connect()
         if self.cfg.requires_broker and self.cfg.po_browser_overlay:
             await self._refresh_browser_overlay(
@@ -527,6 +531,9 @@ class HybridRunner:
                     signal_age_ms=signal_age_ms,
                     current_balance=self.balance,
                 )
+                if not self.control.is_order_allowed():
+                    can_trade = False
+                    reason = "stopped" if self.control.status()["stopped"] else "paused"
                 self.logger.log(
                     "signal",
                     signal=signal,
@@ -695,6 +702,7 @@ class HybridRunner:
         finally:
             self._finalize_charts()
             await self._safe_disconnect()
+            self.control_server.close()
 
 
 async def main() -> None:
