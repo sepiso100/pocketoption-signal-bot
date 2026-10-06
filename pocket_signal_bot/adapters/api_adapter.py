@@ -139,7 +139,7 @@ class PocketOptionApiAdapter:
                 asset=asset_value,
                 index=None,
                 time=datetime.now(timezone.utc).timestamp(),
-                offset=storage_count,
+                offset=count,
                 period=timeframe_sec,
             )
             try:

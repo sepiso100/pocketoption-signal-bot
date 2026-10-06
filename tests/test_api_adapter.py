@@ -146,7 +146,7 @@ class ApiAdapterSdk04Tests(unittest.TestCase):
         request = client.last_history_request
         self.assertEqual(request.asset, FakeAsset.EURUSD_otc)
         self.assertEqual(request.index, None)
-        self.assertEqual(request.offset, 8)
+        self.assertEqual(request.offset, 2)
         self.assertEqual(request.period, 60)
         client.emit.subscribe_to_asset.assert_not_awaited()
         client.emit.change_asset.assert_not_awaited()
