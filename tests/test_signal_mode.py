@@ -3,6 +3,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+from pocket_signal_bot.adapters.api_adapter import CandleDataPending
 from pocket_signal_bot.config import BotConfig, validate_config
 from pocket_signal_bot.runner import HybridRunner
 
@@ -37,8 +38,9 @@ class SignalConnectionRecoveryTests(unittest.TestCase):
     def make_runner(self, api_connect, browser_connect):
         runner = object.__new__(HybridRunner)
         runner.cfg = SimpleNamespace(
-            requires_broker=True, connect_timeout_sec=1.0, skip_api_connect=False,
-            effective_mode="signals",
+            requires_broker=True, connect_timeout_sec=1.0, data_timeout_sec=1.0,
+            skip_api_connect=False, effective_mode="signals", symbol="EURUSD_otc",
+            timeframe_sec=60, candle_count=300,
         )
         runner.api = SimpleNamespace(
             connect=AsyncMock(side_effect=api_connect), disconnect=AsyncMock(), get_balance=AsyncMock()
@@ -90,6 +92,23 @@ class SignalConnectionRecoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Live trading blocked"):
             asyncio.run(runner._safe_connect())
         runner.browser.connect.assert_not_awaited()
+
+    def test_api_history_pending_keeps_connection_and_never_fabricates_data(self):
+        runner = self.make_runner(None, None)
+        runner._api_connected = True
+        runner.api.get_candles = AsyncMock(side_effect=CandleDataPending("safe no-data status"))
+
+        candles, source = asyncio.run(runner._get_candles_with_failover())
+
+        self.assertEqual(candles, [])
+        self.assertEqual(source, "api")
+        self.assertTrue(runner._api_connected)
+        runner.api.disconnect.assert_not_awaited()
+        self.assertFalse(runner._api_candles_disabled)
+        events = [call.args[0] for call in runner.logger.log.call_args_list]
+        self.assertIn("data_wait", events)
+        self.assertNotIn("data_failover", events)
+        self.assertNotIn("safe no-data status", repr(runner.logger.log.call_args_list))
 
 
 if __name__ == "__main__":

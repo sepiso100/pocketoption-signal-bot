@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from pocket_signal_bot.adapters.api_adapter import PocketApiConfig, PocketOptionApiAdapter
+from pocket_signal_bot.adapters.api_adapter import CandleDataPending, PocketApiConfig, PocketOptionApiAdapter
 from pocket_signal_bot.adapters.browser_adapter import BrowserConfig, PocketOptionBrowserAdapter
 from pocket_signal_bot.analysis import analyze_market
 from pocket_signal_bot.config import BotConfig, validate_config
@@ -59,6 +59,8 @@ class HybridRunner:
                 uid=cfg.po_uid,
                 is_demo=cfg.api_is_demo,
                 region=cfg.po_region,
+                symbol=cfg.symbol,
+                timeframe_sec=cfg.timeframe_sec,
             )
         )
         self.browser = PocketOptionBrowserAdapter(
@@ -354,7 +356,7 @@ class HybridRunner:
         if phase == "data" and adapter == "browser" and "could not read price" in text:
             return "browser_quote_unavailable", "Enable PO_USE_WS_QUOTES or configure PO_PRICE_SELECTOR for a real quote."
         if phase == "data" and adapter == "api":
-            return "api_candles_unavailable", "Check PO_SESSION, PO_UID, PO_REGION and SDK candle-method compatibility."
+            return "api_candles_unavailable", "Verify pocket-option==0.4.0, PO_SYMBOL, PO_TIMEFRAME_SEC and account feed; raw exceptions and credentials are redacted."
         if adapter == "api":
             return "api_connect_failed", "Check PO_SESSION, PO_UID, PO_REGION, network access and SDK compatibility; secrets are redacted."
         return "browser_connect_failed", "Check Playwright Chromium installation, Render runtime dependencies and broker login state."
@@ -491,6 +493,7 @@ class HybridRunner:
     async def _get_candles_with_failover(self) -> tuple[list[dict[str, Any]], str]:
         if self.cfg.effective_mode == "paper":
             return self._paper_candles(), "paper"
+        api_pending = False
         if self._api_connected and not self._api_candles_disabled:
             try:
                 candles = await self._api_call(
@@ -502,6 +505,16 @@ class HybridRunner:
                 self._market_connect_failures = 0
                 self._next_market_connect_at = 0.0
                 return candles, "api"
+            except CandleDataPending:
+                # A healthy, authenticated API can take time to deliver history.
+                # Keep it connected and emit no signal until verified candles arrive.
+                api_pending = True
+                self.logger.log(
+                    "data_wait",
+                    adapter="api",
+                    error_code="api_history_pending",
+                    hint="Connected; waiting for verified candles. Check PO_SYMBOL and broker feed; no synthetic data is used.",
+                )
             except Exception as exc:
                 self._api_connected = False
                 self._api_candles_fail_count += 1
@@ -517,8 +530,9 @@ class HybridRunner:
                         fail_count=self._api_candles_fail_count,
                     )
         if not self._browser_connected:
-            self.logger.log("data_error", adapter="browser", error_code="adapter_disconnected", hint="Browser fallback is not connected; reconnect is scheduled.")
-            return [], "error"
+            if not api_pending:
+                self.logger.log("data_error", adapter="browser", error_code="adapter_disconnected", hint="Browser fallback is not connected; reconnect is scheduled.")
+            return [], "api" if api_pending else "error"
         try:
             browser_cap = float(self.cfg.data_timeout_sec) + 50.0
             candles = await asyncio.wait_for(
