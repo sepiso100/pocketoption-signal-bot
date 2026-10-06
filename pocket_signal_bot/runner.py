@@ -390,8 +390,9 @@ class HybridRunner:
             try:
                 await asyncio.wait_for(self.api.connect(), timeout=timeout)
                 self._api_connected = True
+                # Reconnect clears the temporary circuit breaker; keep the
+                # failure streak until an actual candle fetch succeeds.
                 self._api_candles_disabled = False
-                self._api_candles_fail_count = 0
                 self.logger.log("adapter_connect", adapter="api", ok=True)
             except Exception as exc:
                 self._api_connected = False
@@ -403,9 +404,9 @@ class HybridRunner:
         if self.cfg.effective_mode == "live" and not self._api_connected:
             raise RuntimeError("Live trading blocked: broker API is unavailable; browser order fallback is disabled.")
 
-        # Browser is read-only market-data fallback; avoid starting it when the
-        # preferred API is healthy. Retry it only when needed for data access.
-        if self.cfg.effective_mode != "live" and not self._api_connected and not self._browser_connected:
+        # Start the read-only browser fallback alongside the API so an API
+        # candle-method failure can fail over immediately instead of looping.
+        if self.cfg.effective_mode != "live" and not self._browser_connected:
             try:
                 await asyncio.wait_for(self.browser.connect(), timeout=timeout)
                 self._browser_connected = True
@@ -421,7 +422,6 @@ class HybridRunner:
             self.control.update_risk("", False)
             available = self._api_connected or self._browser_connected
             if self._api_connected:
-                self._market_connect_failures = 0
                 self._next_market_connect_at = 0.0
                 self.logger.log("connect_complete", mode="signals", balance_required=False, connected_adapters=["api"])
             elif self._browser_connected:
@@ -498,6 +498,9 @@ class HybridRunner:
                     what="get_candles",
                 )
                 self._api_candles_fail_count = 0
+                self._api_candles_disabled = False
+                self._market_connect_failures = 0
+                self._next_market_connect_at = 0.0
                 return candles, "api"
             except Exception as exc:
                 self._api_connected = False
