@@ -54,6 +54,14 @@ class ControlApiTests(unittest.TestCase):
         self.request("POST", "/v1/control", {"action": "resume"}, self.token)
         self.assertFalse(self.state.is_order_allowed())
 
+    def test_status_exposes_risk_hold_without_secrets(self):
+        self.state.update_risk("settlement_unverified", True)
+        status, payload = self.request("GET", "/v1/control/status", token=self.token)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["risk_halted_reason"], "settlement_unverified")
+        self.assertTrue(payload["pending_order"])
+        self.assertNotIn(self.token, str(payload))
+
     def test_only_supported_actions(self):
         status, _ = self.request("POST", "/v1/control", {"action": "live"}, self.token)
         self.assertEqual(status, 400)

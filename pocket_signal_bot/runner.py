@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -67,6 +68,7 @@ class HybridRunner:
                 ws_debug=cfg.po_ws_debug,
             )
         )
+        initial_balance = 0.0 if cfg.requires_broker else 1000.0
         self.risk = RiskManager(
             RiskConfig(
                 min_payout_pct=cfg.min_payout_pct,
@@ -75,9 +77,10 @@ class HybridRunner:
                 max_trades_per_day=cfg.max_trades_per_day,
                 daily_loss_stop_pct=cfg.daily_loss_stop_pct,
             ),
-            start_balance=1000.0,
+            start_balance=initial_balance,
+            state_path=cfg.risk_state_path,
         )
-        self.balance = 1000.0
+        self.balance = initial_balance
         self._paper_price = 1.0800
         self._api_candles_disabled = False
         self._api_candles_fail_count = 0
@@ -161,21 +164,40 @@ class HybridRunner:
         amt = float(trade_amount)
         pay = float(payout_pct)
         status = str(result.get("result", "") or "").lower()
+        if status not in {"win", "loss", "draw"}:
+            raise RuntimeError("Settlement is unverified; reconciliation is required.")
         if status == "draw":
             return 0.0
         raw = result.get("pnl")
         if raw is not None and isinstance(raw, (int, float)):
             pnl = float(raw)
+            if not math.isfinite(pnl):
+                raise RuntimeError("Settlement P&L is invalid; reconciliation is required.")
             if result.get("settlement_source") == "balance":
                 return pnl
-            # Some paths report profit=0 on a loss; infer full stake loss.
             if pnl == 0.0 and status == "loss":
                 return -amt
             return pnl
-        won = bool(result.get("won", False))
-        if won:
+        if status == "win":
             return amt * (pay / 100.0)
         return -amt
+
+    @staticmethod
+    def _timestamp_seconds(value: Any) -> float | None:
+        if isinstance(value, bool) or value is None:
+            return None
+        try:
+            stamp = float(value)
+        except (TypeError, ValueError):
+            try:
+                stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+            except (TypeError, ValueError):
+                return None
+        if not math.isfinite(stamp):
+            return None
+        if stamp > 1e12:
+            stamp /= 1000.0
+        return stamp if stamp >= 1e9 else None
 
     def _record_session_trade(self, *, pnl: float) -> dict[str, Any]:
         pnl = float(pnl)
@@ -307,62 +329,54 @@ class HybridRunner:
             return
         timeout = float(self.cfg.connect_timeout_sec)
         if self.cfg.skip_api_connect:
-            print(
-                "pocket_signal_bot: PO_SKIP_API_CONNECT=true — skipping API (browser-only mode).",
-                flush=True,
-            )
+            self.logger.log("adapter_connect", adapter="api", ok=False, reason="disabled_by_config")
         else:
-            print(f"pocket_signal_bot: connecting API (max {timeout:g}s)…", flush=True)
             try:
                 await asyncio.wait_for(self.api.connect(), timeout=timeout)
                 self._api_connected = True
                 self.logger.log("adapter_connect", adapter="api", ok=True)
-            except asyncio.TimeoutError:
+            except Exception as exc:
                 self._api_connected = False
-                self.logger.log(
-                    "adapter_connect",
-                    adapter="api",
-                    ok=False,
-                    error=f"timeout after {timeout}s — set PO_SKIP_API_CONNECT=true to skip",
-                )
+                self.logger.log("adapter_connect", adapter="api", ok=False, error=type(exc).__name__)
                 try:
                     await asyncio.wait_for(self.api.disconnect(), timeout=5.0)
                 except Exception:
                     pass
-            except Exception as e:
-                self._api_connected = False
-                self.logger.log("adapter_connect", adapter="api", ok=False, error=str(e))
 
-        print(f"pocket_signal_bot: launching Chromium (max {timeout:g}s)…", flush=True)
-        try:
-            await asyncio.wait_for(self.browser.connect(), timeout=timeout)
-            self._browser_connected = True
-            self.logger.log("adapter_connect", adapter="browser", ok=True)
-        except asyncio.TimeoutError:
-            self._browser_connected = False
-            self.logger.log(
-                "adapter_connect",
-                adapter="browser",
-                ok=False,
-                error=f"timeout after {timeout}s",
-            )
-        except Exception as e:
-            self._browser_connected = False
-            self.logger.log("adapter_connect", adapter="browser", ok=False, error=str(e))
+        # Live execution is API-only. The browser flow cannot verify account,
+        # symbol, expiry, or stake and must never click a real-money order.
+        if self.cfg.effective_mode == "live" and not self._api_connected:
+            raise RuntimeError("Live trading blocked: broker API is unavailable; browser order fallback is disabled.")
+
+        if self.cfg.effective_mode != "live":
+            try:
+                await asyncio.wait_for(self.browser.connect(), timeout=timeout)
+                self._browser_connected = True
+                self.logger.log("adapter_connect", adapter="browser", ok=True)
+            except Exception as exc:
+                self._browser_connected = False
+                self.logger.log("adapter_connect", adapter="browser", ok=False, error=type(exc).__name__)
 
         bal_timeout = min(15.0, max(5.0, timeout / 4))
-        print(f"pocket_signal_bot: reading balance (max {bal_timeout:g}s)…", flush=True)
-        for adapter_name, adapter in (("api", self.api), ("browser", self.browser)):
+        adapters = [("api", self.api)]
+        if self.cfg.effective_mode != "live":
+            adapters.append(("browser", self.browser))
+        verified = False
+        for adapter_name, adapter in adapters:
             try:
                 bal = await asyncio.wait_for(adapter.get_balance(), timeout=bal_timeout)
                 if bal > 0:
-                    self.balance = bal
-                    self.risk.day_start_balance = bal
+                    self.balance = float(bal)
+                    self.risk.set_verified_balance(self.balance)
                     self.logger.log("balance_init", adapter=adapter_name, balance=bal)
+                    verified = True
                     break
             except Exception:
                 continue
-        print("pocket_signal_bot: connect phase done — entering main loop.", flush=True)
+        if not verified:
+            raise RuntimeError("Broker balance could not be verified; trading is blocked.")
+        self.control.update_risk(self.risk.halted_reason, self.risk.pending_order)
+        self.logger.log("connect_complete", mode=self.cfg.effective_mode, balance_verified=True)
 
     async def _safe_disconnect(self) -> None:
         for adapter_name, adapter in (("api", self.api), ("browser", self.browser)):
@@ -424,47 +438,62 @@ class HybridRunner:
             return max(self.cfg.min_payout_pct, 80.0), "paper"
         if self._api_connected:
             try:
-                payout = await self._api_call(self.api.get_payout_pct(self.cfg.symbol), what="get_payout_pct")
-                return payout, "api"
-            except Exception as e:
-                self._api_connected = False
-                self.logger.log("payout_failover", from_adapter="api", to_adapter="browser", error=str(e))
-        try:
-            payout = await self.browser.get_payout_pct(self.cfg.symbol)
-            return payout, "browser"
-        except Exception as e2:
-            self.logger.log("payout_error", adapter="browser", error=str(e2))
-            return max(self.cfg.min_payout_pct, 80.0), "fallback"
+                payout = float(await self._api_call(self.api.get_payout_pct(self.cfg.symbol), what="get_payout_pct"))
+                if 0 < payout < 100:
+                    return payout, "api"
+                raise RuntimeError("invalid payout")
+            except Exception as exc:
+                # A payout lookup failure is not an API disconnect, and must not
+                # be replaced by a guessed percentage.
+                self.logger.log("payout_unverified", adapter="api", error=type(exc).__name__)
+        if self.cfg.effective_mode != "live" and self._browser_connected:
+            try:
+                payout = float(await self.browser.get_payout_pct(self.cfg.symbol))
+                if 0 < payout < 100:
+                    return payout, "browser"
+            except Exception as exc:
+                self.logger.log("payout_unverified", adapter="browser", error=type(exc).__name__)
+        return 0.0, "unverified"
 
-    async def _place_with_failover(self, direction: str, amount: float) -> tuple[str, str]:
+    async def _place_with_failover(
+        self, direction: str, amount: float, candle_key: str | None = None,
+    ) -> tuple[str, str]:
         if not self.cfg.requires_broker:
             return "paper-order", "paper"
-        if self._api_connected:
-            try:
-                order_id = await self._api_call(
-                    self.api.place_order(self.cfg.symbol, amount, direction, self.cfg.expiry_sec),
-                    what="place_order",
-                )
-                return order_id, "api"
-            except Exception as e:
-                self._api_connected = False
-                self.logger.log("order_failover", from_adapter="api", to_adapter="browser", error=str(e))
-        order_id = await self.browser.place_order(
-            self.cfg.symbol, amount, direction, self.cfg.expiry_sec
-        )
-        return order_id, "browser"
+        if not self._api_connected:
+            raise RuntimeError("Broker API is unavailable; refusing browser order execution.")
+        self.risk.mark_pending(candle_key)
+        self.control.update_risk(self.risk.halted_reason, self.risk.pending_order)
+        try:
+            order_id = await self._api_call(
+                self.api.place_order(self.cfg.symbol, amount, direction, self.cfg.expiry_sec),
+                what="place_order",
+            )
+        except Exception as exc:
+            # Submission may have reached the broker before timing out. Never
+            # submit again through a second adapter without reconciliation.
+            self.logger.log("order_submission_uncertain", error=type(exc).__name__)
+            raise RuntimeError("Order submission is uncertain; reconcile before retrying.") from None
+        if not order_id:
+            raise RuntimeError("Broker returned no order id; reconcile before retrying.")
+        return str(order_id), "api"
 
-    async def _refresh_balance(self) -> None:
-        """Fetch live balance from broker after each trade so risk math stays accurate."""
+    async def _refresh_balance(self) -> bool:
+        """Refresh broker balance; never treat an old/synthetic balance as verified."""
         bal_timeout = 10.0
-        for adapter, name in ((self.browser, "browser"), (self.api, "api")):
+        adapters = [(self.api, "api")]
+        if self.cfg.effective_mode != "live" and self._browser_connected:
+            adapters.append((self.browser, "browser"))
+        for adapter, name in adapters:
             try:
                 bal = await asyncio.wait_for(adapter.get_balance(), timeout=bal_timeout)
                 if bal > 0:
-                    self.balance = bal
-                    return
+                    self.balance = float(bal)
+                    return True
             except Exception:
                 continue
+        self.logger.log("balance_unverified", mode=self.cfg.effective_mode)
+        return False
 
     # ── Main loop ────────────────────────────────────────────────────────────
 
@@ -506,13 +535,19 @@ class HybridRunner:
                     await asyncio.sleep(self.cfg.poll_seconds)
                     continue
 
-                # Safe close extraction — skip malformed candles
+                # Reject malformed values and retain the latest source timestamp.
                 closes: list[float] = []
+                latest_candle_ts: float | None = None
                 for c in candles:
                     try:
-                        closes.append(float(c["close"]))
+                        close = float(c["close"])
+                        if not math.isfinite(close):
+                            continue
+                        closes.append(close)
+                        latest_candle_ts = self._timestamp_seconds(c.get("time"))
                     except (KeyError, TypeError, ValueError):
                         continue
+                candle_key = str(int(latest_candle_ts)) if latest_candle_ts is not None else None
                 if not closes:
                     await asyncio.sleep(self.cfg.poll_seconds)
                     continue
@@ -530,7 +565,18 @@ class HybridRunner:
                     payout_pct=payout,
                     signal_age_ms=signal_age_ms,
                     current_balance=self.balance,
+                    candle_key=candle_key,
                 )
+                if self.cfg.requires_broker and latest_candle_ts is None:
+                    can_trade, reason = False, "candle_timestamp_unverified"
+                elif self.cfg.requires_broker and latest_candle_ts is not None:
+                    max_age = self.cfg.max_candle_age_sec or max(30, self.cfg.timeframe_sec * 2)
+                    candle_age = datetime.now(timezone.utc).timestamp() - latest_candle_ts
+                    if candle_age < -1 or candle_age > max_age:
+                        can_trade, reason = False, "candle_stale"
+                if self.cfg.requires_broker and not self._api_connected:
+                    can_trade, reason = False, "broker_api_unavailable"
+                self.control.update_risk(self.risk.halted_reason or (reason if reason != "ok" else ""), self.risk.pending_order)
                 if not self.control.is_order_allowed():
                     can_trade = False
                     reason = "stopped" if self.control.status()["stopped"] else "paused"
@@ -563,9 +609,13 @@ class HybridRunner:
 
                 if signal in {"CALL", "PUT"} and can_trade:
                     try:
-                        order_id, adapter_used = await self._place_with_failover(signal, trade_amount)
-                    except Exception as e:
-                        self.logger.log("order_error", signal=signal, error=str(e))
+                        order_id, adapter_used = await self._place_with_failover(signal, trade_amount, candle_key)
+                    except Exception as exc:
+                        if self.cfg.requires_broker:
+                            self.risk.mark_uncertain("order_submission_uncertain")
+                            self.control.command("stop")
+                            self.control.update_risk(self.risk.halted_reason, self.risk.pending_order)
+                        self.logger.log("order_error", signal=signal, error=type(exc).__name__)
                         await asyncio.sleep(self.cfg.poll_seconds)
                         continue
 
@@ -649,12 +699,23 @@ class HybridRunner:
                                 )
                             else:
                                 result = await self.browser.check_result(order_id, self.cfg.expiry_sec)
-                        except Exception as e:
-                            self.logger.log("result_error", order_id=order_id, error=str(e))
+                        except Exception as exc:
+                            self.risk.mark_uncertain("settlement_unverified")
+                            self.control.command("stop")
+                            self.control.update_risk(self.risk.halted_reason, self.risk.pending_order)
+                            self.logger.log("result_error", order_id=order_id, error=type(exc).__name__)
                             await asyncio.sleep(self.cfg.poll_seconds)
                             continue
 
-                        pnl = self._normalize_settled_pnl(result, trade_amount, payout)
+                        try:
+                            pnl = self._normalize_settled_pnl(result, trade_amount, payout)
+                        except Exception as exc:
+                            self.risk.mark_uncertain("settlement_unverified")
+                            self.control.command("stop")
+                            self.control.update_risk(self.risk.halted_reason, self.risk.pending_order)
+                            self.logger.log("result_unverified", order_id=order_id, error=type(exc).__name__)
+                            await asyncio.sleep(self.cfg.poll_seconds)
+                            continue
                         self.balance += float(pnl)
                         self.risk.register_result(float(pnl) >= 0)
                         sess = self._record_session_trade(pnl=float(pnl))
@@ -667,8 +728,11 @@ class HybridRunner:
                             adapter=adapter_used,
                             result_ts=datetime.now(timezone.utc).isoformat(),
                         )
-                        # Refresh live balance from broker to correct any drift
-                        await self._refresh_balance()
+                        # Balance must be re-verified after each broker settlement.
+                        if not await self._refresh_balance():
+                            self.risk.halt("balance_unverified")
+                            self.control.command("stop")
+                        self.control.update_risk(self.risk.halted_reason, self.risk.pending_order)
                         self.logger.log(
                             "order_result",
                             mode=self.cfg.effective_mode,
@@ -677,7 +741,6 @@ class HybridRunner:
                             push=float(pnl) == 0,
                             pnl=round(float(pnl), 4),
                             balance=round(self.balance, 2),
-                            raw_result=result,
                             signal_ts=signal_ts.isoformat(),
                             send_ts=send_ts.isoformat(),
                             result_ts=datetime.now(timezone.utc).isoformat(),

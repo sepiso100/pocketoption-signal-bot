@@ -16,6 +16,8 @@ class ControlState:
         self.mode = mode
         self._paused = False
         self._stopped = False
+        self._risk_halted_reason = ""
+        self._pending_order = False
         self._lock = threading.Lock()
 
     @property
@@ -33,7 +35,14 @@ class ControlState:
                 "mode": self.mode,
                 "paused": self._paused,
                 "stopped": self._stopped,
+                "risk_halted_reason": self._risk_halted_reason,
+                "pending_order": self._pending_order,
             }
+
+    def update_risk(self, halted_reason: str, pending_order: bool) -> None:
+        with self._lock:
+            self._risk_halted_reason = str(halted_reason or "")[:64]
+            self._pending_order = bool(pending_order)
 
     def command(self, action: str) -> bool:
         if action == "pause":

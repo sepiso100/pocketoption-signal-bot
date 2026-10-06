@@ -1,0 +1,48 @@
+services:
+  - type: web
+    name: pocketoption-signal-worker
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m pocket_signal_bot.runner
+    healthCheckPath: /healthz
+    autoDeploy: false
+    disk:
+      name: pocketoption-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PO_MODE
+        value: live
+      - key: PO_LIVE_CONFIRMED
+        sync: false
+      - key: PO_REGION
+        sync: false
+      - key: PO_SESSION
+        sync: false
+      - key: PO_UID
+        sync: false
+      - key: PO_TRADE_AMOUNT
+        sync: false
+      - key: SIGNAL_CONTROL_TOKEN
+        sync: false
+      - key: PO_IS_DEMO
+        value: "false"
+      - key: PO_TRADE_DATA_PATH
+        value: /var/data/trading_history.json
+      - key: PO_RISK_STATE_PATH
+        value: /var/data/risk_state.json
+      - key: PO_CHARTS_DIR
+        value: /var/data/charts
+      - key: PO_MIN_PAYOUT_PCT
+        value: "70"
+      - key: PO_MAX_CONSECUTIVE_LOSSES
+        value: "3"
+      - key: PO_MAX_TRADES_PER_DAY
+        value: "20"
+      - key: PO_DAILY_LOSS_STOP_PCT
+        value: "2"
+      - key: PO_TIMEFRAME_SEC
+        value: "60"
+      - key: PO_EXPIRY_SEC
+        value: "60"

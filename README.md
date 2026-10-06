@@ -11,9 +11,8 @@ The PocketOption bot is designed around:
 
 - EMA + RSI signal engine (`CALL` / `PUT` / `NO_TRADE`)
 - Risk controls (daily stops, max losses, max trades/day, min payout)
-- Hybrid adapters:
-  - Unofficial API adapter (primary)
-  - Browser adapter fallback
+- Broker orders use the unofficial API only; browser order clicks are disabled.
+- Browser adapter is limited to read-only quotes and diagnostics.
 - Structured event logs with timing fields
 
 ### Files
@@ -104,7 +103,9 @@ set PO_IS_DEMO=false
 python -m pocket_signal_bot.runner
 ```
 
-The bot refuses to start `PO_MODE=live` unless `PO_LIVE_CONFIRMED=true`.
+The bot refuses to start `PO_MODE=live` unless `PO_LIVE_CONFIRMED=true`, an explicit real-account `PO_REGION`, and a fixed `PO_TRADE_AMOUNT` are set. Demo mode always forces the API into demo mode, regardless of `PO_IS_DEMO`.
+
+Live mode never clicks browser trade buttons. Missing/unverified broker balance, payout, order ID, or settlement blocks further trading. An uncertain order is persisted as pending and requires manual broker reconciliation before restarting. Risk limits persist only when `PO_RISK_STATE_PATH` is on durable storage. The current unofficial API does not expose verified payout data, so live orders remain blocked until a trustworthy payout source is implemented and verified.
 
 Event output goes to the terminal when `PO_CONSOLE_LOG=true` (no log files are written).
 
