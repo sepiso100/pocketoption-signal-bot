@@ -13,21 +13,23 @@ services:
       sizeGB: 1
     envVars:
       - key: PO_MODE
-        value: live
-      - key: PO_LIVE_CONFIRMED
-        sync: false
+        value: signals
       - key: PO_REGION
-        sync: false
+        value: DEMO
       - key: PO_SESSION
         sync: false
       - key: PO_UID
         sync: false
-      - key: PO_TRADE_AMOUNT
+      - key: PO_IS_DEMO
+        value: "true"
+      - key: PO_SKIP_API_CONNECT
+        value: "false"
+      - key: SIGNAL_INGEST_URL
+        sync: false
+      - key: SIGNAL_INGEST_TOKEN
         sync: false
       - key: SIGNAL_CONTROL_TOKEN
         sync: false
-      - key: PO_IS_DEMO
-        value: "false"
       - key: PO_TRADE_DATA_PATH
         value: /var/data/trading_history.json
       - key: PO_RISK_STATE_PATH

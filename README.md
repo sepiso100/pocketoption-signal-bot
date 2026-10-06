@@ -7,6 +7,8 @@ This workspace now contains two independent bot paths:
 
 ## PocketOption Hybrid Signal Bot
 
+The Render blueprint defaults to `PO_MODE=signals` (read-only; no orders). Existing manually created Render services may retain their old environment values, so verify `PO_MODE` in Render. Live is a separate, explicit opt-in and remains fail-closed; see [LIVE_DEPLOYMENT.md](LIVE_DEPLOYMENT.md).
+
 The PocketOption bot is designed around:
 
 - EMA + RSI signal engine (`CALL` / `PUT` / `NO_TRADE`)
