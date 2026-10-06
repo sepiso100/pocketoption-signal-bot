@@ -146,3 +146,13 @@ Optional: `PO_EXPERIMENT_LABEL=15/15` overrides the auto label used in compariso
 ## Important
 
 No strategy guarantees profit. Treat this as research/automation infrastructure and validate on demo first.
+
+## Render control API
+
+Set `SIGNAL_CONTROL_TOKEN` to enable authenticated controls. Render supplies `PORT`; locally, the API defaults to `8080`.
+
+- `GET /healthz` — public generic liveness response (`{"status":"ok"}`).
+- `GET /v1/control/status` — Bearer-token status; omits credentials and account data.
+- `POST /v1/control` — Bearer-token JSON `{"action":"pause"}`, `resume`, or `stop`.
+
+Pause blocks new orders; resume allows them again. Stop permanently blocks future orders for that process. Remote controls never change `PO_MODE` or enable live trading. Mode changes require a deployment restart, and `PO_MODE=live` still requires `PO_LIVE_CONFIRMED=true` at startup. Before selling this service, use a separate isolated Render worker per customer.
