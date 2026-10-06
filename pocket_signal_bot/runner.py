@@ -1,19 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import math
 import time
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from pocket_signal_bot.adapters.api_adapter import PocketApiConfig, PocketOptionApiAdapter
 from pocket_signal_bot.adapters.browser_adapter import BrowserConfig, PocketOptionBrowserAdapter
+from pocket_signal_bot.analysis import analyze_market
 from pocket_signal_bot.config import BotConfig, validate_config
 from pocket_signal_bot.control import ControlServer, ControlState
 from pocket_signal_bot.logger import JsonEventLogger
 from pocket_signal_bot.paper_simulator import PocketPaperSimulator
 from pocket_signal_bot.risk import RiskConfig, RiskManager
 from pocket_signal_bot.strategy import EmaRsiStrategy, StrategyConfig
+from pocket_signal_bot.signal_publisher import SignalPublisher
 from pocket_signal_bot.trade_store import TradeStore
 
 try:
@@ -28,6 +32,9 @@ class HybridRunner:
         self.control = ControlState(mode=cfg.effective_mode)
         self.control_server = ControlServer(self.control)
         self.logger = JsonEventLogger(console=cfg.po_console_log)
+        self.signal_publisher = SignalPublisher(cfg.signal_ingest_url, cfg.signal_ingest_token, timeout_sec=60.0)
+        self._next_signal_publish_at = 0.0
+        self._last_signal_slot: int | None = None
         self.strategy = EmaRsiStrategy(
             StrategyConfig(
                 ema_fast=cfg.ema_fast,
@@ -293,7 +300,7 @@ class HybridRunner:
             return
         lq = getattr(self.browser, "last_ws_quote", None)
         lines = [
-            f"PocketOption bot  |  {self.cfg.effective_mode.upper()}",
+            f"PocketOption {'signal service' if self.cfg.effective_mode == 'signals' else 'bot'}  |  {self.cfg.effective_mode.upper()}",
             f"Symbol: {self.cfg.symbol}  |  amount: {trade_amount}",
             f"Signal: {signal}  |  payout: {payout}%",
             f"Trade allowed: {'YES' if can_trade else 'NO'} ({reason})",
@@ -356,6 +363,12 @@ class HybridRunner:
             except Exception as exc:
                 self._browser_connected = False
                 self.logger.log("adapter_connect", adapter="browser", ok=False, error=type(exc).__name__)
+
+        if self.cfg.effective_mode == "signals":
+            # Read-only signal service needs market candles, never account balance.
+            self.control.update_risk("", False)
+            self.logger.log("connect_complete", mode="signals", balance_required=False)
+            return
 
         bal_timeout = min(15.0, max(5.0, timeout / 4))
         adapters = [("api", self.api)]
@@ -458,6 +471,8 @@ class HybridRunner:
     async def _place_with_failover(
         self, direction: str, amount: float, candle_key: str | None = None,
     ) -> tuple[str, str]:
+        if getattr(self.cfg, "effective_mode", None) == "signals":
+            raise RuntimeError("Signal-only mode categorically blocks order submission.")
         if not self.cfg.requires_broker:
             return "paper-order", "paper"
         if not self._api_connected:
@@ -555,30 +570,58 @@ class HybridRunner:
                 signal_info = self.strategy.generate_details(closes)
                 raw_signal = str(signal_info["signal"])
                 signal, sig_meta = self._finalize_signal(raw_signal)
-
-                # signal_ts measured AFTER data fetch — reflects true freshness for risk gate
-                signal_ts = datetime.now(timezone.utc)
-                payout, payout_adapter = await self._get_payout_with_failover()
-                trade_amount = float(self.cfg.trade_amount)
-                signal_age_ms = int((datetime.now(timezone.utc) - signal_ts).total_seconds() * 1000)
-                can_trade, reason = self.risk.can_trade(
-                    payout_pct=payout,
-                    signal_age_ms=signal_age_ms,
-                    current_balance=self.balance,
-                    candle_key=candle_key,
+                market = analyze_market(
+                    candles,
+                    signal,
+                    ema_fast=self.cfg.ema_fast,
+                    ema_slow=self.cfg.ema_slow,
+                    rsi_period=self.cfg.rsi_period,
                 )
-                if self.cfg.requires_broker and latest_candle_ts is None:
-                    can_trade, reason = False, "candle_timestamp_unverified"
-                elif self.cfg.requires_broker and latest_candle_ts is not None:
-                    max_age = self.cfg.max_candle_age_sec or max(30, self.cfg.timeframe_sec * 2)
-                    candle_age = datetime.now(timezone.utc).timestamp() - latest_candle_ts
-                    if candle_age < -1 or candle_age > max_age:
-                        can_trade, reason = False, "candle_stale"
-                if self.cfg.requires_broker and not self._api_connected:
-                    can_trade, reason = False, "broker_api_unavailable"
-                self.control.update_risk(self.risk.halted_reason or (reason if reason != "ok" else ""), self.risk.pending_order)
+                signal_mode = self.cfg.effective_mode == "signals"
+                if signal_mode:
+                    signal = str(market["signal"])
+                    if int(market["alignment_score"]) < self.cfg.signal_min_alignment:
+                        signal = "NO_TRADE"
+
+                # Signal-only mode never requests payout/balance and never enters the order path.
+                signal_ts = datetime.now(timezone.utc)
+                trade_amount = float(self.cfg.trade_amount) if not signal_mode else 0.0
+                market_data_valid = True
+                if signal_mode:
+                    payout, payout_adapter = 0.0, "not_required"
+                    can_trade, reason = False, "signals_only"
+                    if latest_candle_ts is None:
+                        market_data_valid, reason = False, "candle_timestamp_unverified"
+                    elif not (self._api_connected or (candles_adapter == "browser" and self._browser_connected)):
+                        market_data_valid, reason = False, "market_feed_unavailable"
+                    else:
+                        max_age = self.cfg.max_candle_age_sec or max(30, self.cfg.timeframe_sec * 2)
+                        candle_age = datetime.now(timezone.utc).timestamp() - latest_candle_ts
+                        if candle_age < -1 or candle_age > max_age:
+                            market_data_valid, reason = False, "candle_stale"
+                    self.control.update_risk("", self.risk.pending_order)
+                else:
+                    payout, payout_adapter = await self._get_payout_with_failover()
+                    signal_age_ms = int((datetime.now(timezone.utc) - signal_ts).total_seconds() * 1000)
+                    can_trade, reason = self.risk.can_trade(
+                        payout_pct=payout,
+                        signal_age_ms=signal_age_ms,
+                        current_balance=self.balance,
+                        candle_key=candle_key,
+                    )
+                    if self.cfg.requires_broker and latest_candle_ts is None:
+                        can_trade, reason = False, "candle_timestamp_unverified"
+                    elif self.cfg.requires_broker and latest_candle_ts is not None:
+                        max_age = self.cfg.max_candle_age_sec or max(30, self.cfg.timeframe_sec * 2)
+                        candle_age = datetime.now(timezone.utc).timestamp() - latest_candle_ts
+                        if candle_age < -1 or candle_age > max_age:
+                            can_trade, reason = False, "candle_stale"
+                    if self.cfg.requires_broker and not self._api_connected:
+                        can_trade, reason = False, "broker_api_unavailable"
+                    self.control.update_risk(self.risk.halted_reason or (reason if reason != "ok" else ""), self.risk.pending_order)
                 if not self.control.is_order_allowed():
                     can_trade = False
+                    market_data_valid = False
                     reason = "stopped" if self.control.status()["stopped"] else "paused"
                 self.logger.log(
                     "signal",
@@ -595,6 +638,12 @@ class HybridRunner:
                     ema_diff=round(float(signal_info.get("ema_diff", 0.0)), 8),
                     rsi=round(float(signal_info.get("rsi", 50.0)), 4),
                     momentum=round(float(signal_info.get("momentum", 0.0)), 8),
+                    market_bias=market.get("market_bias"),
+                    ema_state=market.get("ema_state"),
+                    rsi_label=market.get("rsi_label"),
+                    structure=market.get("structure"),
+                    candle_pressure=market.get("candle_pressure"),
+                    alignment_score=market.get("alignment_score"),
                     amount=trade_amount,
                 )
                 await self._refresh_browser_overlay(
@@ -605,9 +654,44 @@ class HybridRunner:
                     reason=reason,
                     candles_adapter=candles_adapter,
                     last_close=closes[-1],
+                    extra=(
+                        f"Bias: {market['market_bias']} | EMA: {market['ema_state']} | "
+                        f"RSI: {market['rsi_value']} ({market['rsi_label']}) | "
+                        f"Alignment: {market['alignment_score']}/100 — not a win probability"
+                    ),
                 )
 
-                if signal in {"CALL", "PUT"} and can_trade:
+                if signal_mode and signal in {"CALL", "PUT"} and market_data_valid and self.control.is_order_allowed():
+                    now = time.time()
+                    slot = int(now // self.cfg.signal_interval_sec)
+                    if now >= self._next_signal_publish_at and slot != self._last_signal_slot:
+                        self._last_signal_slot = slot
+                        self._next_signal_publish_at = now + self.cfg.signal_interval_sec
+                        entry_time = datetime.now(ZoneInfo(self.cfg.signal_timezone)).isoformat(timespec="seconds")
+                        signal_id = hashlib.sha256(
+                            f"{self.cfg.symbol}|{slot}|{signal}".encode("utf-8")
+                        ).hexdigest()
+                        delivery = await self.signal_publisher.publish({
+                            "signal_id": signal_id,
+                            "symbol": self.cfg.symbol,
+                            "side": signal,
+                            "entry_time": entry_time,
+                            "expiry_seconds": self.cfg.expiry_sec,
+                            "analysis": market,
+                        })
+                        self.logger.log(
+                            "signal_delivery",
+                            symbol=self.cfg.symbol,
+                            signal=signal,
+                            alignment_score=market["alignment_score"],
+                            ok=delivery.get("ok", False),
+                            reason=delivery.get("reason", "accepted" if delivery.get("ok") else "unknown"),
+                            sent=delivery.get("sent", 0),
+                            failed=delivery.get("failed", 0),
+                            skipped=delivery.get("skipped", 0),
+                        )
+
+                if self.cfg.effective_mode != "signals" and signal in {"CALL", "PUT"} and can_trade:
                     try:
                         order_id, adapter_used = await self._place_with_failover(signal, trade_amount, candle_key)
                     except Exception as exc:

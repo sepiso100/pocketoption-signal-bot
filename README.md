@@ -148,6 +148,28 @@ Optional: `PO_EXPERIMENT_LABEL=15/15` overrides the auto label used in compariso
 
 No strategy guarantees profit. Treat this as research/automation infrastructure and validate on demo first.
 
+## Private signal delivery (read-only mode)
+
+The worker can generate formatted, evidence-based signal cards and submit them to Pass Keys for private delivery to active subscribers of one exact product. It does not send a signal when the setup is weak, data is stale, or required analysis is unavailable.
+
+Set `PO_MODE=signals` to enable this path. This mode requires PocketOption session credentials only to read market candles; the order method explicitly refuses to place trades. Keep the account in demo mode. It does not require a stake or payout value.
+
+Required worker settings:
+
+- `PO_MODE=signals`
+- `PO_SESSION` and numeric `PO_UID` for market data
+- `SIGNAL_INGEST_URL=https://<pass-keys-host>/v1/signals`
+- `SIGNAL_INGEST_TOKEN` — same random 32+ character secret as Pass Keys
+- `PO_SIGNAL_INTERVAL_SEC=360` (six-minute default)
+- `PO_SIGNAL_MIN_ALIGNMENT=70` (minimum 70/100 confluence)
+- `PO_SIGNAL_TIMEZONE=Africa/Lusaka`
+
+Pass Keys must also set `SIGNAL_INGEST_TOKEN` and `SIGNAL_SUBSCRIPTION_APP_NAME` to the exact product key used under Firebase `loginDetails`. It rechecks active linked subscriptions at send time. Each customer must start the Telegram bot before private delivery can work.
+
+Signal cards show market bias, EMA state, RSI, structure breaks when OHLC is available, and a clearly labelled candle-pressure proxy. True order flow is not supplied by this feed. The alignment score measures indicator agreement—not a win probability. The service never recommends Martingale or recovery staking.
+
+This path has not been deployed or verified against a live broker feed. Use demo data first; no strategy guarantees profit.
+
 ## Render control API
 
 Set `SIGNAL_CONTROL_TOKEN` to a random value of at least 32 characters to enable authenticated controls. Render supplies `PORT`; locally, the API defaults to `8080`.
