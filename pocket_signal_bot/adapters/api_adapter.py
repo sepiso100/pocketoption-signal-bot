@@ -14,6 +14,14 @@ def _safe_label(value: Any) -> str:
     return "".join(ch for ch in raw if ch.isascii() and (ch.isalnum() or ch in "_./-"))[:64] or "unknown"
 
 
+_AUTH_SUCCESS_EVENTS = frozenset({"successauth", "auth/success"})
+
+
+def _is_auth_success_event(event_name: str) -> bool:
+    """Recognize both the SDK and current browser authorization event names."""
+    return _safe_label(event_name).lower() in _AUTH_SUCCESS_EVENTS
+
+
 def _safe_payload_meta(data: Any) -> tuple[str, str, int]:
     """Summarize inbound data without logging any values."""
     payload_type = type(data).__name__
@@ -132,18 +140,22 @@ class PocketOptionApiAdapter:
                 super().__init__()
 
             async def handle_new_event(self, event_name: str, data: Any = None):
+                is_auth_success = _is_auth_success_event(event_name)
+                if is_auth_success:
+                    # The current site emits auth/success; SDK 0.4.0 waits for successauth.
+                    self.authorized_event.set()
                 started_at = self._auth_diag_started_at
                 if started_at is not None:
                     self._auth_diag_event_count += 1
                     label = _safe_label(event_name)
-                    important = label.lower() == "successauth" or any(
+                    important = is_auth_success or any(
                         marker in label.lower() for marker in ("auth", "error", "reject", "fail")
                     )
                     if self._auth_diag_logged_count < 30 and (self._auth_diag_event_count <= 20 or important):
                         self._auth_diag_logged_count += 1
                         payload_type, payload_keys, payload_bytes = _safe_payload_meta(data)
                         elapsed_ms = int((time.monotonic() - started_at) * 1000)
-                        status = "success" if label.lower() == "successauth" else "observed"
+                        status = "success" if is_auth_success else "observed"
                         print(
                             f"[api] auth_response event={label} status={status} elapsed_ms={elapsed_ms} "
                             f"payload_type={_safe_label(payload_type)} payload_keys={payload_keys} "
