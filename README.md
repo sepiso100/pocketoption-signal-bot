@@ -178,6 +178,6 @@ Set `SIGNAL_CONTROL_TOKEN` to a random value of at least 32 characters to enable
 
 - `GET /healthz` — public generic liveness response (`{"status":"ok"}`).
 - `GET /v1/control/status` — Bearer-token status; omits credentials and account data.
-- `POST /v1/control` — Bearer-token JSON `{"action":"pause"}`, `resume`, or `stop`.
+- `POST /v1/control` — Bearer-token JSON `{"action":"pause"}`, `resume`, `stop`, or `start`.
 
-Pause blocks new orders; resume allows them again. Stop permanently blocks future orders for that process. Remote controls never change `PO_MODE` or enable live trading. Mode changes require a deployment restart, and `PO_MODE=live` still requires `PO_LIVE_CONFIRMED=true` at startup. Before selling this service, use a separate isolated Render worker per customer.
+Pause blocks new orders/signals; resume clears pause but never clears Stop. In `signals` mode only, Start clears Stop if no risk hold or pending order exists. While stopped, the signals worker keeps its authenticated control server alive without fetching new candles or publishing signals. In trading modes, Stop remains terminal until a process restart. Remote controls never change `PO_MODE`, clear risk holds, or enable live trading. Mode changes require a deployment restart, and `PO_MODE=live` still requires `PO_LIVE_CONFIRMED=true` at startup. Before selling this service, use a separate isolated Render worker per customer.

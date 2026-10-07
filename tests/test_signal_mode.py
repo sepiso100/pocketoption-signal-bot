@@ -83,6 +83,21 @@ class SignalConnectionRecoveryTests(unittest.TestCase):
         self.assertEqual(runner.api.connect.await_count, 2)
         runner.api.get_balance.assert_not_awaited()
 
+    def test_socket_reconnect_does_not_reset_candle_failure_backoff(self):
+        runner = self.make_runner(None, None)
+        runner._api_candles_fail_count = 297
+        runner._next_market_connect_at = 12345.0
+        self.assertTrue(asyncio.run(runner._safe_connect()))
+        self.assertEqual(runner._next_market_connect_at, 12345.0)
+        self.assertEqual(runner._api_candles_fail_count, 297)
+        complete = [call for call in runner.logger.log.call_args_list if call.args[0] == "connect_complete"][0]
+        self.assertFalse(complete.kwargs["candles_verified"])
+        self.assertEqual(complete.kwargs["connected_adapters"], ["api", "browser"])
+
+    def test_data_timeout_is_not_misreported_as_connect_failure(self):
+        code, _ = HybridRunner._safe_adapter_error("browser", asyncio.TimeoutError(), phase="data")
+        self.assertEqual(code, "data_timeout")
+
     def test_live_api_failure_still_blocks_without_browser_order_fallback(self):
         runner = self.make_runner(RuntimeError("temporary failure"), None)
         runner.cfg.effective_mode = "live"

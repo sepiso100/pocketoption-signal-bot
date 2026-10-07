@@ -76,7 +76,8 @@ class PocketOptionBrowserAdapter:
 
     @staticmethod
     def _normalize_pair(asset: str) -> str:
-        a = (asset or "").upper().replace("_OTC", "").replace("-OTC", "").replace("/", "").replace("-", "")
+        # OTC and exchange-market assets are distinct feeds.
+        a = (asset or "").upper().replace("/", "").replace("-", "").replace("_", "")
         return a
 
     def _on_websocket(self, ws: Any) -> None:
@@ -131,7 +132,7 @@ class PocketOptionBrowserAdapter:
             # ["EURUSD", ts, bid, ask] or ["EURUSD", bid, ask] or nested list of those tuples.
             if obj and isinstance(obj[0], str):
                 pair = self._normalize_pair(obj[0])
-                if sym_u and (sym_u in pair or pair in sym_u):
+                if sym_u and sym_u == pair:
                     nums = [float(x) for x in obj[1:] if isinstance(x, (int, float))]
                     # prefer last numeric as "last/ask" style fallback
                     if nums:
@@ -152,7 +153,7 @@ class PocketOptionBrowserAdapter:
             )
             if asset is not None:
                 a = self._normalize_pair(str(asset))
-                if sym_u and (sym_u in a or a in sym_u):
+                if sym_u and sym_u == a:
                     for pk in (
                         "close",
                         "price",
@@ -188,7 +189,7 @@ class PocketOptionBrowserAdapter:
         return m.group(1)
 
     def _ingest_ws_payload(self, text: str, *, ws_url: str = "", direction: str = "recv") -> None:
-        if not self.cfg.use_ws_quotes or len(text) < 2:
+        if direction != "recv" or not self.cfg.use_ws_quotes or len(text) < 2:
             return
         sym = self.cfg.quote_asset
         array_text = self._extract_json_array_text(text)
@@ -386,8 +387,7 @@ class PocketOptionBrowserAdapter:
                     return float(cleaned)
             except Exception:
                 continue
-        if self.cfg.use_ws_quotes and self._last_ws_price is not None:
-            return float(self._last_ws_price)
+        # Never timestamp an expired cached quote as fresh market data.
         raise RuntimeError(
             "Could not read price: enable PO_USE_WS_QUOTES=true and wait for quotes, "
             "or set PO_PRICE_SELECTOR to a DOM element with the quote text."
@@ -416,6 +416,10 @@ class PocketOptionBrowserAdapter:
             raise RuntimeError("Browser adapter cleanup failed") from None
 
     async def get_candles(self, asset: str, timeframe_sec: int, count: int) -> list[dict[str, Any]]:
+        if self._normalize_pair(asset) != self._normalize_pair(self.cfg.quote_asset):
+            raise RuntimeError("Browser quote asset does not match the requested candle asset")
+        if timeframe_sec <= 0 or count <= 0:
+            raise ValueError("Candle period and count must be positive")
         if self.cfg.use_ws_quotes and self._page is not None:
             deadline = time.time() + 45.0
             while self._last_ws_price is None and time.time() < deadline:
