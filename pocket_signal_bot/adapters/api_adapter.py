@@ -3,8 +3,38 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 import asyncio
+import json
 import math
 import time
+
+
+def _safe_label(value: Any) -> str:
+    """Return a short log-safe label without payload values."""
+    raw = str(value)
+    return "".join(ch for ch in raw if ch.isascii() and (ch.isalnum() or ch in "_./-"))[:64] or "unknown"
+
+
+def _safe_payload_meta(data: Any) -> tuple[str, str, int]:
+    """Summarize inbound data without logging any values."""
+    payload_type = type(data).__name__
+    keys = "none"
+    if isinstance(data, dict):
+        safe_keys = []
+        for key in list(data.keys())[:12]:
+            label = _safe_label(key)[:32]
+            if label:
+                safe_keys.append(label)
+        keys = ",".join(safe_keys) or "none"
+    try:
+        if isinstance(data, (bytes, bytearray)):
+            payload_bytes = len(data)
+        elif isinstance(data, str):
+            payload_bytes = len(data.encode("utf-8"))
+        else:
+            payload_bytes = len(json.dumps(data, ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
+    except Exception:
+        payload_bytes = -1
+    return payload_type, keys, payload_bytes
 
 
 @dataclass
@@ -71,6 +101,38 @@ class PocketOptionApiAdapter:
 
         if not self.cfg.session.strip() or not self.cfg.uid.strip():
             raise RuntimeError("API authentication requires PO_SESSION and PO_UID")
+
+        class AuthDiagnosticClient(PocketOptionClient):
+            """Observe SDK events using metadata only; never log payload values."""
+
+            def __init__(self):
+                self._auth_diag_started_at: float | None = None
+                self._auth_diag_event_count = 0
+                self._auth_diag_logged_count = 0
+                self._auth_diag_disconnect_seen = False
+                super().__init__()
+
+            async def handle_new_event(self, event_name: str, data: Any = None):
+                started_at = self._auth_diag_started_at
+                if started_at is not None:
+                    self._auth_diag_event_count += 1
+                    label = _safe_label(event_name)
+                    important = label.lower() == "successauth" or any(
+                        marker in label.lower() for marker in ("auth", "error", "reject", "fail")
+                    )
+                    if self._auth_diag_logged_count < 30 and (self._auth_diag_event_count <= 20 or important):
+                        self._auth_diag_logged_count += 1
+                        payload_type, payload_keys, payload_bytes = _safe_payload_meta(data)
+                        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+                        status = "success" if label.lower() == "successauth" else "observed"
+                        print(
+                            f"[api] auth_response event={label} status={status} elapsed_ms={elapsed_ms} "
+                            f"payload_type={_safe_label(payload_type)} payload_keys={payload_keys} "
+                            f"payload_bytes={payload_bytes}",
+                            flush=True,
+                        )
+                return await super().handle_new_event(event_name, data)
+
         print("[api] connect_stage=resolve_region status=started", flush=True)
         regions = __import__("pocket_option.constants", fromlist=["Regions"]).Regions
         region = getattr(regions, self.cfg.region, None)
@@ -78,8 +140,20 @@ class PocketOptionApiAdapter:
             raise RuntimeError("Unknown PO_REGION; use a supported SDK region")
         print("[api] connect_stage=resolve_region status=ok", flush=True)
 
-        self._client = PocketOptionClient()
+        self._client = AuthDiagnosticClient()
         self._client.on.load_history_period_fast(self._on_history)
+
+        async def _on_socket_disconnect() -> None:
+            client = self._client
+            if client is None:
+                return
+            client._auth_diag_disconnect_seen = True
+            started_at = client._auth_diag_started_at
+            if started_at is not None:
+                elapsed_ms = int((time.monotonic() - started_at) * 1000)
+                print(f"[api] auth_socket status=closed elapsed_ms={elapsed_ms}", flush=True)
+
+        self._client.on.disconnect(_on_socket_disconnect)
         print("[api] connect_stage=build_auth status=started", flush=True)
         auth = AuthorizationData.model_validate(
             {
@@ -98,13 +172,33 @@ class PocketOptionApiAdapter:
         print("[api] connect_stage=socket_connect status=ok", flush=True)
 
         print("[api] connect_stage=emit_auth status=started", flush=True)
+        auth_started_at = time.monotonic()
+        self._client._auth_diag_started_at = auth_started_at
         await self._client.emit.auth(auth)
         print("[api] connect_stage=emit_auth status=ok", flush=True)
 
         # A socket connection alone does not prove broker authentication.
         print("[api] connect_stage=wait_authorization status=started", flush=True)
-        await self._client.wait_for_authorization(timeout=15.0)
-        print("[api] connect_stage=wait_authorization status=ok", flush=True)
+        try:
+            await self._client.wait_for_authorization(timeout=15.0)
+        except Exception as exc:
+            elapsed_ms = int((time.monotonic() - auth_started_at) * 1000)
+            try:
+                socket_connected: bool | str = bool(self._client.sio.connected)
+            except Exception:
+                socket_connected = "unknown"
+            print(
+                f"[api] auth_wait status=failed elapsed_ms={elapsed_ms} "
+                f"error_type={_safe_label(type(exc).__name__)} message=authorization_wait_failed "
+                f"socket_connected={socket_connected} "
+                f"disconnect_seen={self._client._auth_diag_disconnect_seen}",
+                flush=True,
+            )
+            raise
+        else:
+            print("[api] connect_stage=wait_authorization status=ok", flush=True)
+        finally:
+            self._client._auth_diag_started_at = None
         self._deals = MemoryDealsStorage(self._client)
 
     async def disconnect(self) -> None:
