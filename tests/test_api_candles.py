@@ -6,7 +6,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from pocket_option.models import Asset, LoadHistoryPeriodFastResponse
-from pocket_signal_bot.adapters.api_adapter import PocketApiConfig, PocketOptionApiAdapter
+from pocket_signal_bot.adapters.api_adapter import (
+    PocketApiConfig,
+    PocketOptionApiAdapter,
+    _is_auth_success_event,
+)
 
 
 def response(index=1, asset=Asset.EURUSD, period=60, invalid=False):
@@ -17,6 +21,13 @@ def response(index=1, asset=Asset.EURUSD, period=60, invalid=False):
                   'close': '1.2', 'high': '0.5' if invalid else '1.3',
                   'low': '1.0', 'volume': 40}],
     })
+
+
+class AuthEventTests(unittest.TestCase):
+    def test_accepts_both_verified_auth_success_event_names(self):
+        self.assertTrue(_is_auth_success_event("successauth"))
+        self.assertTrue(_is_auth_success_event("auth/success"))
+        self.assertFalse(_is_auth_success_event("updateAssets"))
 
 
 class ApiCandleTests(unittest.IsolatedAsyncioTestCase):
