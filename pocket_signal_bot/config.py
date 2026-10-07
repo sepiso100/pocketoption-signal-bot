@@ -114,6 +114,7 @@ class BotConfig:
     po_uid: str = os.getenv("PO_UID", "")
     po_is_demo: bool = _env_bool("PO_IS_DEMO", True)
     po_region: str = os.getenv("PO_REGION", "DEMO")
+    po_auth_session_field: str = os.getenv("PO_AUTH_SESSION_FIELD", "sessionToken").strip()
 
     # Browser (Playwright) options
     po_headless: bool = _env_bool("PO_HEADLESS", True)
@@ -183,6 +184,8 @@ class BotConfig:
 
 def validate_config(cfg: BotConfig) -> None:
     """Validate safety-critical settings before connecting to a broker."""
+    if cfg.requires_broker and cfg.po_auth_session_field not in ("session", "sessionToken"):
+        raise SystemExit("Refusing broker start: PO_AUTH_SESSION_FIELD must be session or sessionToken.")
     if cfg.effective_mode == "live":
         if not cfg.po_live_confirmed:
             raise SystemExit("Refusing live start: PO_LIVE_CONFIRMED=true is required.")

@@ -27,7 +27,9 @@ For API auth, look for `auth_response event=auth/success status=success` or
 For data health, `no_candles` means there is still no usable feed; a `signal`
 event means the runner accepted candle data. Signal mode never submits orders.
 
-The pinned SDK's public examples show `session`; this bot's current adapter
-serializes the observed browser key `sessionToken`. Do not change that mapping
-without a verified frame from the same server and a successful test deployment.
+The pinned SDK 0.4.0 model serializes `session`; the observed browser frame uses
+`sessionToken`. The adapter keeps `sessionToken` as the default. For one
+controlled demo test, set `PO_AUTH_SESSION_FIELD=session`; it logs only the
+selected field name. Restore the default if auth still times out. Never log or
+share auth values or frames.
 `updateAssets` and an open socket do not prove authorization.
