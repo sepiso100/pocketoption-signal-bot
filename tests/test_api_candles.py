@@ -92,6 +92,19 @@ class ApiCandleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(auth_wire['sessionToken'], 'private-session')
         self.assertNotIn('session', auth_wire)
 
+    async def test_sdk_session_field_option_uses_pinned_model_schema(self):
+        self.adapter.cfg.auth_session_field = "session"
+        client = SimpleNamespace(on=SimpleNamespace(load_history_period_fast=lambda cb: None),
+                                 emit=SimpleNamespace(auth=AsyncMock()),
+                                 connect=AsyncMock(), wait_for_authorization=AsyncMock())
+        with patch('pocket_option.PocketOptionClient', return_value=client), \
+             patch('pocket_option.contrib.deals.MemoryDealsStorage', return_value=object()):
+            await self.adapter.connect()
+        auth = client.emit.auth.await_args.args[0]
+        auth_wire = auth.model_dump(mode='json', by_alias=True)
+        self.assertEqual(auth_wire['session'], 'private-session')
+        self.assertNotIn('sessionToken', auth_wire)
+
     async def test_invalid_region_is_not_silently_replaced_with_demo(self):
         self.adapter.cfg.region = 'INVALID_REGION'
         with self.assertRaisesRegex(RuntimeError, 'Unknown PO_REGION'):

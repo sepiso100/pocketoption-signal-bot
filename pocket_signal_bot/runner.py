@@ -68,6 +68,7 @@ class HybridRunner:
                 uid=cfg.po_uid,
                 is_demo=cfg.api_is_demo,
                 region=cfg.po_region,
+                auth_session_field=cfg.po_auth_session_field,
             )
         )
         self.browser = PocketOptionBrowserAdapter(

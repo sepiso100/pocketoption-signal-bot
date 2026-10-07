@@ -45,23 +45,33 @@ def _safe_payload_meta(data: Any) -> tuple[str, str, int]:
     return payload_type, keys, payload_bytes
 
 
-def _build_auth_data(authorization_data_type: type, session: str, uid: str, is_demo: bool) -> Any:
-    """Use the browser's current sessionToken wire key with the pinned SDK model."""
-    from pydantic import Field
+def _build_auth_data(
+    authorization_data_type: type,
+    session: str,
+    uid: str,
+    is_demo: bool,
+    session_field: str = "sessionToken",
+) -> Any:
+    """Build the auth model using one explicitly selected session field."""
+    payload: dict[str, Any] = {
+        "isDemo": 1 if is_demo else 0,
+        "uid": int(uid),
+        "platform": 2,
+        "isFastHistory": True,
+        "isOptimized": True,
+    }
+    if session_field == "session":
+        payload["session"] = session
+        return authorization_data_type.model_validate(payload)
+    if session_field == "sessionToken":
+        from pydantic import Field
 
-    class BrowserAuthorizationData(authorization_data_type):
-        session: str = Field(..., alias="sessionToken")
+        class BrowserAuthorizationData(authorization_data_type):
+            session: str = Field(..., alias="sessionToken")
 
-    return BrowserAuthorizationData.model_validate(
-        {
-            "sessionToken": session,
-            "isDemo": 1 if is_demo else 0,
-            "uid": int(uid),
-            "platform": 2,
-            "isFastHistory": True,
-            "isOptimized": True,
-        }
-    )
+        payload["sessionToken"] = session
+        return BrowserAuthorizationData.model_validate(payload)
+    raise ValueError("PO_AUTH_SESSION_FIELD must be session or sessionToken")
 
 
 @dataclass
@@ -70,6 +80,7 @@ class PocketApiConfig:
     uid: str
     is_demo: bool = True
     region: str = "DEMO"
+    auth_session_field: str = "sessionToken"
 
 
 class PocketOptionApiAdapter:
@@ -191,8 +202,12 @@ class PocketOptionApiAdapter:
             session=self.cfg.session,
             uid=self.cfg.uid,
             is_demo=self.cfg.is_demo,
+            session_field=self.cfg.auth_session_field,
         )
-        print("[api] connect_stage=build_auth status=ok", flush=True)
+        print(
+            f"[api] connect_stage=build_auth status=ok auth_session_field={self.cfg.auth_session_field}",
+            flush=True,
+        )
 
         print("[api] connect_stage=socket_connect status=started", flush=True)
         await self._client.connect(region)
