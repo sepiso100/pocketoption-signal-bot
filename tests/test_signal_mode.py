@@ -1,9 +1,12 @@
 import asyncio
+import io
 import unittest
+from contextlib import redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from pocket_signal_bot.config import BotConfig, validate_config
+from pocket_signal_bot.logger import JsonEventLogger
 from pocket_signal_bot.runner import HybridRunner
 
 
@@ -97,6 +100,24 @@ class SignalConnectionRecoveryTests(unittest.TestCase):
     def test_data_timeout_is_not_misreported_as_connect_failure(self):
         code, _ = HybridRunner._safe_adapter_error("browser", asyncio.TimeoutError(), phase="data")
         self.assertEqual(code, "data_timeout")
+
+    def test_api_diagnostic_classifies_auth_failure_without_logging_secret(self):
+        secret = "session-token-do-not-log-0123456789"
+        diagnostic = HybridRunner._safe_exception_diagnostic(
+            RuntimeError(f"Unauthorized; session={secret}")
+        )
+        self.assertEqual(diagnostic, "authentication_rejected (RuntimeError)")
+        self.assertNotIn(secret, diagnostic)
+
+    def test_connect_failure_log_displays_safe_diagnostic(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            JsonEventLogger().log(
+                "adapter_connect", adapter="api", ok=False,
+                error_code="api_connect_failed", diagnostic="authentication_rejected (RuntimeError)",
+            )
+        self.assertIn("api_connect_failed", output.getvalue())
+        self.assertIn("authentication_rejected", output.getvalue())
 
     def test_live_api_failure_still_blocks_without_browser_order_fallback(self):
         runner = self.make_runner(RuntimeError("temporary failure"), None)

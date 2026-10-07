@@ -361,6 +361,34 @@ class HybridRunner:
             return "api_connect_failed", "Check PO_SESSION, PO_UID, PO_REGION, network access and SDK compatibility; secrets are redacted."
         return "browser_connect_failed", "Check Playwright Chromium installation, Render runtime dependencies and broker login state."
 
+    @staticmethod
+    def _safe_exception_diagnostic(exc: Exception) -> str:
+        """Return a useful allow-listed cause without logging exception text or secrets."""
+        chain: list[Exception] = []
+        current: Exception | None = exc
+        while current is not None and len(chain) < 4:
+            chain.append(current)
+            current = current.__cause__ or current.__context__
+
+        text = " ".join(str(item).lower() for item in chain)
+        categories = (
+            ("authentication_rejected", ("unauthorized", "authentication failed", "invalid session", "invalid token", "auth failed")),
+            ("access_denied", ("forbidden", "access denied", "status code 403", "http 403")),
+            ("rate_limited", ("rate limit", "too many requests", "status code 429", "http 429")),
+            ("dns_failure", ("name or service not known", "temporary failure in name resolution", "getaddrinfo failed")),
+            ("connection_refused", ("connection refused",)),
+            ("connection_reset", ("connection reset", "peer reset")),
+            ("tls_failure", ("ssl error", "certificate verify failed", "tls handshake")),
+            ("websocket_handshake_failed", ("websocket handshake", "invalid status code")),
+            ("timeout", ("timed out", "timeout")),
+            ("region_config_error", ("unknown po_region", "unsupported region")),
+        )
+        cause = next((label for label, markers in categories if any(marker in text for marker in markers)), None)
+        exc_name = type(chain[-1]).__name__
+        if not exc_name.isascii() or not exc_name.replace("_", "").isalnum():
+            exc_name = "Exception"
+        return f"{cause or 'unclassified'} ({exc_name[:40]})"
+
     def _schedule_market_retry(self) -> int:
         self._market_connect_failures += 1
         delay = min(60, 2 ** min(self._market_connect_failures, 6))
@@ -399,7 +427,10 @@ class HybridRunner:
             except Exception as exc:
                 self._api_connected = False
                 api_error = self._safe_adapter_error("api", exc, phase="connect")
-                self.logger.log("adapter_connect", adapter="api", ok=False, error_code=api_error[0], hint=api_error[1])
+                self.logger.log(
+                    "adapter_connect", adapter="api", ok=False, error_code=api_error[0],
+                    hint=api_error[1], diagnostic=self._safe_exception_diagnostic(exc),
+                )
                 await self._disconnect_adapter("api")
 
         # Live execution remains API-only. Never use browser order fallback.
@@ -416,7 +447,10 @@ class HybridRunner:
             except Exception as exc:
                 self._browser_connected = False
                 browser_error = self._safe_adapter_error("browser", exc, phase="connect")
-                self.logger.log("adapter_connect", adapter="browser", ok=False, error_code=browser_error[0], hint=browser_error[1])
+                self.logger.log(
+                    "adapter_connect", adapter="browser", ok=False, error_code=browser_error[0],
+                    hint=browser_error[1], diagnostic=self._safe_exception_diagnostic(exc),
+                )
                 await self._disconnect_adapter("browser")
 
         if self.cfg.effective_mode == "signals":
