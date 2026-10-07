@@ -37,6 +37,25 @@ def _safe_payload_meta(data: Any) -> tuple[str, str, int]:
     return payload_type, keys, payload_bytes
 
 
+def _build_auth_data(authorization_data_type: type, session: str, uid: str, is_demo: bool) -> Any:
+    """Use the browser's current sessionToken wire key with the pinned SDK model."""
+    from pydantic import Field
+
+    class BrowserAuthorizationData(authorization_data_type):
+        session: str = Field(..., alias="sessionToken")
+
+    return BrowserAuthorizationData.model_validate(
+        {
+            "sessionToken": session,
+            "isDemo": 1 if is_demo else 0,
+            "uid": int(uid),
+            "platform": 2,
+            "isFastHistory": True,
+            "isOptimized": True,
+        }
+    )
+
+
 @dataclass
 class PocketApiConfig:
     session: str
@@ -155,15 +174,11 @@ class PocketOptionApiAdapter:
 
         self._client.on.disconnect(_on_socket_disconnect)
         print("[api] connect_stage=build_auth status=started", flush=True)
-        auth = AuthorizationData.model_validate(
-            {
-                "session": self.cfg.session,
-                "isDemo": 1 if self.cfg.is_demo else 0,
-                "uid": int(self.cfg.uid),
-                "platform": 2,
-                "isFastHistory": True,
-                "isOptimized": True,
-            }
+        auth = _build_auth_data(
+            AuthorizationData,
+            session=self.cfg.session,
+            uid=self.cfg.uid,
+            is_demo=self.cfg.is_demo,
         )
         print("[api] connect_stage=build_auth status=ok", flush=True)
 
