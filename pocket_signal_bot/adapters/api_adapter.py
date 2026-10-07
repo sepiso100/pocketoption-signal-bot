@@ -71,12 +71,16 @@ class PocketOptionApiAdapter:
 
         if not self.cfg.session.strip() or not self.cfg.uid.strip():
             raise RuntimeError("API authentication requires PO_SESSION and PO_UID")
+        print("[api] connect_stage=resolve_region status=started", flush=True)
         regions = __import__("pocket_option.constants", fromlist=["Regions"]).Regions
         region = getattr(regions, self.cfg.region, None)
         if region is None:
             raise RuntimeError("Unknown PO_REGION; use a supported SDK region")
+        print("[api] connect_stage=resolve_region status=ok", flush=True)
+
         self._client = PocketOptionClient()
         self._client.on.load_history_period_fast(self._on_history)
+        print("[api] connect_stage=build_auth status=started", flush=True)
         auth = AuthorizationData.model_validate(
             {
                 "session": self.cfg.session,
@@ -87,10 +91,20 @@ class PocketOptionApiAdapter:
                 "isOptimized": True,
             }
         )
+        print("[api] connect_stage=build_auth status=ok", flush=True)
+
+        print("[api] connect_stage=socket_connect status=started", flush=True)
         await self._client.connect(region)
+        print("[api] connect_stage=socket_connect status=ok", flush=True)
+
+        print("[api] connect_stage=emit_auth status=started", flush=True)
         await self._client.emit.auth(auth)
+        print("[api] connect_stage=emit_auth status=ok", flush=True)
+
         # A socket connection alone does not prove broker authentication.
+        print("[api] connect_stage=wait_authorization status=started", flush=True)
         await self._client.wait_for_authorization(timeout=15.0)
+        print("[api] connect_stage=wait_authorization status=ok", flush=True)
         self._deals = MemoryDealsStorage(self._client)
 
     async def disconnect(self) -> None:
