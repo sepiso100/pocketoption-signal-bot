@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import math
+import os
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -24,6 +25,14 @@ try:
     from pocket_signal_bot.charts import generate_charts
 except ImportError:
     generate_charts = None  # type: ignore[misc, assignment]
+
+
+def _render_source_sha() -> str:
+    """Return Render's commit SHA only when it is a safe hexadecimal value."""
+    value = os.getenv("RENDER_GIT_COMMIT", "").strip().lower()
+    if 7 <= len(value) <= 40 and all(char in "0123456789abcdef" for char in value):
+        return value
+    return "unknown"
 
 
 class HybridRunner:
@@ -643,9 +652,13 @@ class HybridRunner:
     async def run(self) -> None:
         self.logger.log(
             "startup",
+            source_sha=_render_source_sha(),
             effective_mode=self.cfg.effective_mode,
             api_is_demo=self.cfg.api_is_demo,
             requires_broker=self.cfg.requires_broker,
+            po_session_present=bool(self.cfg.po_session.strip()),
+            po_uid_numeric=self.cfg.po_uid.strip().isdigit(),
+            po_region=self.cfg.po_region.strip(),
         )
         self.control_server.start()
         await self._safe_connect()
