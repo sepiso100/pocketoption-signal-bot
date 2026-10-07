@@ -342,6 +342,8 @@ class HybridRunner:
             messages.append(str(cause).lower())
         text = " ".join(messages)
         if isinstance(exc, asyncio.TimeoutError):
+            if phase == "data":
+                return "data_timeout", "Market data timed out; check broker login, quote subscription and PO_DATA_TIMEOUT_SEC."
             return "connect_timeout", "Check network and PO_CONNECT_TIMEOUT_SEC; no credential values are logged."
         if "install playwright" in text or "no module named 'playwright'" in text:
             return "playwright_dependency_missing", "Install project requirements, then install the Playwright Chromium browser."
@@ -422,8 +424,12 @@ class HybridRunner:
             self.control.update_risk("", False)
             available = self._api_connected or self._browser_connected
             if self._api_connected:
-                self._next_market_connect_at = 0.0
-                self.logger.log("connect_complete", mode="signals", balance_required=False, connected_adapters=["api"])
+                # Only successful candle retrieval resets failure backoff.
+                if self._api_candles_fail_count == 0:
+                    self._next_market_connect_at = 0.0
+                self.logger.log("connect_complete", mode="signals", balance_required=False,
+                                connected_adapters=[name for name, ready in (("api", self._api_connected), ("browser", self._browser_connected)) if ready],
+                                candles_verified=False)
             elif self._browser_connected:
                 retry_after = self._schedule_market_retry()
                 self.logger.log(
@@ -529,7 +535,7 @@ class HybridRunner:
         except Exception as exc:
             code, hint = self._safe_adapter_error("browser", exc, phase="data")
             self.logger.log("data_error", adapter="browser", error_code=code, hint=hint)
-            if code == "adapter_disconnected":
+            if code in {"adapter_disconnected", "data_timeout"}:
                 await self._disconnect_adapter("browser")
                 self._schedule_market_retry()
             return [], "error"
@@ -622,6 +628,11 @@ class HybridRunner:
             )
         try:
             while True:
+                if self.cfg.effective_mode == "signals" and self.control.status()["stopped"]:
+                    # Keep the authenticated control server alive for Start,
+                    # without reconnecting or generating signals after Stop.
+                    await asyncio.sleep(max(0.1, min(self.cfg.poll_seconds, 1.0)))
+                    continue
                 if self.cfg.effective_mode == "signals" and not self._api_connected:
                     if time.monotonic() >= self._next_market_connect_at:
                         await self._safe_connect()

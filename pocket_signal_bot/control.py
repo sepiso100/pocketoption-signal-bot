@@ -37,6 +37,7 @@ class ControlState:
                 "stopped": self._stopped,
                 "risk_halted_reason": self._risk_halted_reason,
                 "pending_order": self._pending_order,
+                "start_allowed": self.mode == "signals" and not self._pending_order and not self._risk_halted_reason,
             }
 
     def update_risk(self, halted_reason: str, pending_order: bool) -> None:
@@ -45,7 +46,14 @@ class ControlState:
             self._pending_order = bool(pending_order)
 
     def command(self, action: str) -> bool:
-        if action == "pause":
+        if action == "start":
+            with self._lock:
+                # Restart read-only signal publication, never trading or risk holds.
+                if self.mode != "signals" or self._pending_order or self._risk_halted_reason:
+                    return False
+                self._stopped = False
+                self._paused = False
+        elif action == "pause":
             with self._lock:
                 self._paused = True
         elif action == "resume":
@@ -106,8 +114,11 @@ class _Handler(BaseHTTPRequestHandler):
         except (ValueError, json.JSONDecodeError):
             self._send(400, {"error": "invalid_json"})
             return
-        if not isinstance(action, str) or not self.server.state.command(action):
-            self._send(400, {"error": "action_must_be_pause_resume_or_stop"})
+        if not isinstance(action, str) or action not in {"start", "pause", "resume", "stop"}:
+            self._send(400, {"error": "action_must_be_start_pause_resume_or_stop"})
+            return
+        if not self.server.state.command(action):
+            self._send(409, {"error": "start_blocked_by_safety", **self.server.state.status()})
             return
         self._send(200, self.server.state.status())
 
