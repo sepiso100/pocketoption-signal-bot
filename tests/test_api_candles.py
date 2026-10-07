@@ -75,7 +75,11 @@ class ApiCandleTests(unittest.IsolatedAsyncioTestCase):
              patch('pocket_option.contrib.deals.MemoryDealsStorage', return_value=object()):
             await self.adapter.connect()
         client.wait_for_authorization.assert_awaited_once_with(timeout=15.0)
-        self.assertEqual(client.emit.auth.await_args.args[0].uid, 123)
+        auth = client.emit.auth.await_args.args[0]
+        self.assertEqual(auth.uid, 123)
+        auth_wire = auth.model_dump(mode='json', by_alias=True)
+        self.assertEqual(auth_wire['sessionToken'], 'private-session')
+        self.assertNotIn('session', auth_wire)
 
     async def test_invalid_region_is_not_silently_replaced_with_demo(self):
         self.adapter.cfg.region = 'INVALID_REGION'
