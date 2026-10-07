@@ -68,8 +68,9 @@ class JsonEventLogger:
             if ok:
                 print(f"[{ts}] CONNECT OK {ad}", flush=True)
             else:
-                err = str(payload.get("error", ""))[:100]
-                print(f"[{ts}] CONNECT FAIL {ad}: {err}", flush=True)
+                code = str(payload.get("error_code", "connect_failed"))[:60]
+                diagnostic = str(payload.get("diagnostic", "cause_unavailable"))[:80]
+                print(f"[{ts}] CONNECT FAIL {ad}: {code}; cause={diagnostic}", flush=True)
         elif event_type == "balance_init":
             print(f"[{ts}] BALANCE {payload.get('adapter')} = {payload.get('balance')}", flush=True)
         else:
