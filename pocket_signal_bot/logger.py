@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sys
 from datetime import datetime, timezone
 from typing import Any
@@ -14,9 +15,14 @@ class JsonEventLogger:
     def _print_console(self, event_type: str, payload: dict[str, Any]) -> None:
         ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
         if event_type == "startup":
+            raw_sha = payload.get("source_sha", "unknown")
+            source_sha = str(raw_sha).strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{7,40}", source_sha):
+                source_sha = "unknown"
             print(
                 f"[{ts}] START mode={payload.get('effective_mode')} "
-                f"api_demo={payload.get('api_is_demo')} broker={payload.get('requires_broker')}",
+                f"api_demo={payload.get('api_is_demo')} broker={payload.get('requires_broker')} "
+                f"source_sha={source_sha}",
                 flush=True,
             )
         elif event_type == "signal":
@@ -60,8 +66,12 @@ class JsonEventLogger:
         elif event_type == "no_candles":
             print(f"[{ts}] NO CANDLES adapter={payload.get('adapter')} (waiting…)", flush=True)
         elif event_type == "data_error":
-            err = str(payload.get("error", ""))[:120]
-            print(f"[{ts}] DATA ERROR {payload.get('adapter')}: {err}", flush=True)
+            raw_code = str(payload.get("error_code", "data_error")).strip().lower()
+            code = raw_code if re.fullmatch(r"[a-z0-9_]{1,60}", raw_code) else "unknown_error"
+            # The runner supplies only fixed, allow-listed hints; never print raw exceptions.
+            hint = str(payload.get("hint", "")).replace("\r", " ").replace("\n", " ")[:180]
+            detail = f"; {hint}" if hint else ""
+            print(f"[{ts}] DATA ERROR {payload.get('adapter')}: {code}{detail}", flush=True)
         elif event_type == "adapter_connect":
             ok = payload.get("ok")
             ad = payload.get("adapter")
